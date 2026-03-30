@@ -158,6 +158,81 @@ pub unsafe fn microkernel_16x32(
 }
 
 // ---------------------------------------------------------------------------
+// Fused AMX batch: single asm block eliminates LLVM fences between ops
+// ---------------------------------------------------------------------------
+
+/// 18 AMX ops in ONE asm block: 2 LDY + 8 LDX + 8 FMA.
+/// No LLVM-inserted fences between instructions.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fused_batch_16x64(
+    a0: u64,
+    a1: u64,
+    bx0: u64,
+    bx1: u64,
+    bx2: u64,
+    bx3: u64,
+    bx4: u64,
+    bx5: u64,
+    bx6: u64,
+    bx7: u64,
+    f0: u64,
+    f1: u64,
+    f2: u64,
+    f3: u64,
+    g0: u64,
+    g1: u64,
+    g2: u64,
+    g3: u64,
+) {
+    // op 1 = LDY, op 0 = LDX, op 12 = FMA32
+    core::arch::asm!(
+        // LDY a0 (Y[0]), LDY a1 (Y[1])
+        ".word (0x00201000 + (1 << 5) + 0{a0} - ((0{a0} >> 4) * 6))",
+        ".word (0x00201000 + (1 << 5) + 0{a1} - ((0{a1} >> 4) * 6))",
+        // LDX b0-b3 (X[0]-X[3])
+        ".word (0x00201000 + (0 << 5) + 0{bx0} - ((0{bx0} >> 4) * 6))",
+        ".word (0x00201000 + (0 << 5) + 0{bx1} - ((0{bx1} >> 4) * 6))",
+        ".word (0x00201000 + (0 << 5) + 0{bx2} - ((0{bx2} >> 4) * 6))",
+        ".word (0x00201000 + (0 << 5) + 0{bx3} - ((0{bx3} >> 4) * 6))",
+        // FMA32 tiles 0-3 with Y[0]
+        ".word (0x00201000 + (12 << 5) + 0{f0} - ((0{f0} >> 4) * 6))",
+        ".word (0x00201000 + (12 << 5) + 0{f1} - ((0{f1} >> 4) * 6))",
+        ".word (0x00201000 + (12 << 5) + 0{f2} - ((0{f2} >> 4) * 6))",
+        ".word (0x00201000 + (12 << 5) + 0{f3} - ((0{f3} >> 4) * 6))",
+        // LDX b4-b7 (X[4]-X[7])
+        ".word (0x00201000 + (0 << 5) + 0{bx4} - ((0{bx4} >> 4) * 6))",
+        ".word (0x00201000 + (0 << 5) + 0{bx5} - ((0{bx5} >> 4) * 6))",
+        ".word (0x00201000 + (0 << 5) + 0{bx6} - ((0{bx6} >> 4) * 6))",
+        ".word (0x00201000 + (0 << 5) + 0{bx7} - ((0{bx7} >> 4) * 6))",
+        // FMA32 tiles 0-3 with Y[1]
+        ".word (0x00201000 + (12 << 5) + 0{g0} - ((0{g0} >> 4) * 6))",
+        ".word (0x00201000 + (12 << 5) + 0{g1} - ((0{g1} >> 4) * 6))",
+        ".word (0x00201000 + (12 << 5) + 0{g2} - ((0{g2} >> 4) * 6))",
+        ".word (0x00201000 + (12 << 5) + 0{g3} - ((0{g3} >> 4) * 6))",
+        a0 = in(reg) a0,
+        a1 = in(reg) a1,
+        bx0 = in(reg) bx0,
+        bx1 = in(reg) bx1,
+        bx2 = in(reg) bx2,
+        bx3 = in(reg) bx3,
+        bx4 = in(reg) bx4,
+        bx5 = in(reg) bx5,
+        bx6 = in(reg) bx6,
+        bx7 = in(reg) bx7,
+        f0 = in(reg) f0,
+        f1 = in(reg) f1,
+        f2 = in(reg) f2,
+        f3 = in(reg) f3,
+        g0 = in(reg) g0,
+        g1 = in(reg) g1,
+        g2 = in(reg) g2,
+        g3 = in(reg) g3,
+        options(nostack),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 16×64 microkernel (quad-wide: all 4 Z tiles in N direction)
 // ---------------------------------------------------------------------------
 
@@ -177,56 +252,72 @@ pub unsafe fn microkernel_16x64(
     b3: *const u8,
     k: usize,
 ) {
-    let mut first = [true; 4];
     let mut p = 0usize;
 
-    // Batch of 2 rank-1 updates: 2Y + 4×2X + 4×2FMA = 18 instructions.
+    // First batch: use skip_z (bit 27) to clear all 4 tiles.
+    if p + 2 <= k {
+        let a0 = a_panel.add(p * 64) as u64;
+        let a1 = (a_panel.add((p + 1) * 64) as u64) | (1u64 << 56);
+        let bx0 = b0.add(p * 64) as u64;
+        let bx1 = (b1.add(p * 64) as u64) | (1u64 << 56);
+        let bx2 = (b2.add(p * 64) as u64) | (2u64 << 56);
+        let bx3 = (b3.add(p * 64) as u64) | (3u64 << 56);
+        let bx4 = (b0.add((p + 1) * 64) as u64) | (4u64 << 56);
+        let bx5 = (b1.add((p + 1) * 64) as u64) | (5u64 << 56);
+        let bx6 = (b2.add((p + 1) * 64) as u64) | (6u64 << 56);
+        let bx7 = (b3.add((p + 1) * 64) as u64) | (7u64 << 56);
+
+        // fma_first operands (skip_z=1) for tiles 0-3.
+        let f0 = fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+        let f1 = fma_first(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+        let f2 = fma_first(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
+        let f3 = fma_first(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
+        let g0 = fma_acc(XRow::new_unchecked(4), YRow::new_unchecked(1), 0);
+        let g1 = fma_acc(XRow::new_unchecked(5), YRow::new_unchecked(1), 1);
+        let g2 = fma_acc(XRow::new_unchecked(6), YRow::new_unchecked(1), 2);
+        let g3 = fma_acc(XRow::new_unchecked(7), YRow::new_unchecked(1), 3);
+
+        // Single asm block: 18 AMX ops, no LLVM fences between them.
+        fused_batch_16x64(
+            a0, a1, bx0, bx1, bx2, bx3, bx4, bx5, bx6, bx7, f0, f1, f2, f3, g0, g1, g2, g3,
+        );
+        p += 2;
+    }
+
+    // Steady-state: accumulate (no skip_z).
     while p + 2 <= k {
-        // Prefetch.
         if p + 4 <= k {
             crate::sync::prefetch::prefetch_l1(a_panel.add((p + 2) * 64));
             crate::sync::prefetch::prefetch_l1(b0.add((p + 2) * 64));
         }
 
-        // Load 2 A columns.
-        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
-        amx_op::<OP_LDY>((a_panel.add((p + 1) * 64) as u64) | (1u64 << 56));
+        let a0 = a_panel.add(p * 64) as u64;
+        let a1 = (a_panel.add((p + 1) * 64) as u64) | (1u64 << 56);
+        let bx0 = b0.add(p * 64) as u64;
+        let bx1 = (b1.add(p * 64) as u64) | (1u64 << 56);
+        let bx2 = (b2.add(p * 64) as u64) | (2u64 << 56);
+        let bx3 = (b3.add(p * 64) as u64) | (3u64 << 56);
+        let bx4 = (b0.add((p + 1) * 64) as u64) | (4u64 << 56);
+        let bx5 = (b1.add((p + 1) * 64) as u64) | (5u64 << 56);
+        let bx6 = (b2.add((p + 1) * 64) as u64) | (6u64 << 56);
+        let bx7 = (b3.add((p + 1) * 64) as u64) | (7u64 << 56);
 
-        // Load 4 B strips for update 0 into X[0..3].
-        amx_op::<OP_LDX>(b0.add(p * 64) as u64);
-        amx_op::<OP_LDX>((b1.add(p * 64) as u64) | (1u64 << 56));
-        amx_op::<OP_LDX>((b2.add(p * 64) as u64) | (2u64 << 56));
-        amx_op::<OP_LDX>((b3.add(p * 64) as u64) | (3u64 << 56));
+        let f0 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+        let f1 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+        let f2 = fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
+        let f3 = fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
+        let g0 = fma_acc(XRow::new_unchecked(4), YRow::new_unchecked(1), 0);
+        let g1 = fma_acc(XRow::new_unchecked(5), YRow::new_unchecked(1), 1);
+        let g2 = fma_acc(XRow::new_unchecked(6), YRow::new_unchecked(1), 2);
+        let g3 = fma_acc(XRow::new_unchecked(7), YRow::new_unchecked(1), 3);
 
-        // FMA 4 tiles with Y[0].
-        for t in 0u8..4 {
-            if first[t as usize] {
-                amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
-                first[t as usize] = false;
-            } else {
-                amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
-            }
-        }
-
-        // Load 4 B strips for update 1 into X[4..7].
-        amx_op::<OP_LDX>((b0.add((p + 1) * 64) as u64) | (4u64 << 56));
-        amx_op::<OP_LDX>((b1.add((p + 1) * 64) as u64) | (5u64 << 56));
-        amx_op::<OP_LDX>((b2.add((p + 1) * 64) as u64) | (6u64 << 56));
-        amx_op::<OP_LDX>((b3.add((p + 1) * 64) as u64) | (7u64 << 56));
-
-        // FMA 4 tiles with Y[1].
-        for t in 0u8..4 {
-            amx_op::<OP_FMA32>(fma_acc(
-                XRow::new_unchecked(4 + t),
-                YRow::new_unchecked(1),
-                t,
-            ));
-        }
-
+        fused_batch_16x64(
+            a0, a1, bx0, bx1, bx2, bx3, bx4, bx5, bx6, bx7, f0, f1, f2, f3, g0, g1, g2, g3,
+        );
         p += 2;
     }
 
-    // Remainder: single update.
+    // Remainder.
     if p < k {
         amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
         amx_op::<OP_LDX>(b0.add(p * 64) as u64);
@@ -234,13 +325,10 @@ pub unsafe fn microkernel_16x64(
         amx_op::<OP_LDX>((b2.add(p * 64) as u64) | (2u64 << 56));
         amx_op::<OP_LDX>((b3.add(p * 64) as u64) | (3u64 << 56));
 
-        for t in 0u8..4 {
-            if first[t as usize] {
-                amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
-            } else {
-                amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
-            }
-        }
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3));
     }
 }
 
