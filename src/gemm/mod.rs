@@ -19,8 +19,11 @@ use crate::matrix;
 const MR: usize = 16;
 const NR: usize = 16;
 const MC: usize = 64;
-const KC: usize = 512;
-const NC: usize = 512;
+// KC/NC chosen per-call based on matrix size.
+const KC_LARGE: usize = 512;
+const NC_LARGE: usize = 512;
+const KC_SMALL: usize = 256;
+const NC_SMALL: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Aligned allocation
@@ -157,16 +160,20 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
         }
     };
 
-    let mut a_pack = AlignedBuf::new(MC * KC);
-    let mut b_pack = AlignedBuf::new(KC * NC);
+    // Adaptive blocking: large KC for big K, small for small K.
+    let kc_max = if k > 256 { KC_LARGE } else { KC_SMALL };
+    let nc_max = if n > 256 { NC_LARGE } else { NC_SMALL };
+
+    let mut a_pack = AlignedBuf::new(MC * kc_max);
+    let mut b_pack = AlignedBuf::new(kc_max * nc_max);
 
     let mut pc = 0;
     while pc < k {
-        let kc = (k - pc).min(KC);
+        let kc = (k - pc).min(kc_max);
 
         let mut jc = 0;
         while jc < n {
-            let nc = (n - jc).min(NC);
+            let nc = (n - jc).min(nc_max);
             pack_b_nr(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
 
             let mut ic = 0;

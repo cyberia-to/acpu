@@ -22,6 +22,13 @@ pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize
     let mut p = 0usize;
 
     while p + 8 <= k {
+        // Prefetch next batch while loading current.
+        if p + 16 <= k {
+            for i in (0..8).step_by(4) {
+                crate::sync::prefetch::prefetch_l1(b_panel.add((p + 8 + i) * 64));
+                crate::sync::prefetch::prefetch_l1(a_panel.add((p + 8 + i) * 64));
+            }
+        }
         for i in 0u8..8 {
             amx_op::<OP_LDX>((b_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
             amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
