@@ -9,8 +9,10 @@
 //! and dropping it calls AMX_CLR.
 
 pub mod asm;
+pub mod fma;
 pub mod ops;
 pub mod regs;
+pub mod tile;
 
 pub use regs::{XRow, YRow, ZRow, ALL_X, ALL_Y, ALL_Z};
 

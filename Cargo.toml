@@ -18,6 +18,10 @@ path = "src/probe/main.rs"
 name = "matmul"
 path = "examples/matmul.rs"
 
+[[example]]
+name = "bench_sgemm"
+path = "examples/bench_sgemm.rs"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

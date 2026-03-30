@@ -1,15 +1,14 @@
 //! Typed AMX register row indices.
 //!
-//! The AMX coprocessor exposes three register files (X, Y, Z), each
-//! containing 8 rows of 64 bytes. These newtypes enforce the valid
-//! range (0..=7) at construction time so downstream code can rely on
-//! the index being in-bounds.
+//! X and Y: 8 rows × 64 bytes each (512 bytes per bank).
+//! Z: 64 rows × 64 bytes = 4096 bytes total. For f32, there are
+//! 4 independent 16×16 tiles selected by `z_row & 3`.
 
 use crate::RamxError;
 use core::fmt;
 
 // ---------------------------------------------------------------------------
-// XRow
+// XRow (0..=7)
 // ---------------------------------------------------------------------------
 
 /// Index of an X-register row (0..=7).
@@ -17,11 +16,6 @@ use core::fmt;
 pub struct XRow(u8);
 
 impl XRow {
-    /// Create a new X-row index.
-    ///
-    /// # Errors
-    ///
-    /// Returns `RamxError::AmxOpFailed` if `index > 7`.
     #[inline]
     pub fn new(index: u8) -> crate::Result<Self> {
         if index > 7 {
@@ -33,20 +27,23 @@ impl XRow {
         }
     }
 
-    /// Create a new X-row index without bounds checking.
-    ///
     /// # Safety
     ///
-    /// `index` must be in `0..=7`.
+    /// Caller must ensure `index <= 7`.
     #[inline]
     pub const unsafe fn new_unchecked(index: u8) -> Self {
         Self(index)
     }
 
-    /// Return the raw row index.
     #[inline]
     pub const fn index(self) -> u8 {
         self.0
+    }
+
+    /// Byte offset into the 512-byte circular X buffer.
+    #[inline]
+    pub const fn byte_offset(self) -> u64 {
+        (self.0 as u64) * 64
     }
 }
 
@@ -57,7 +54,7 @@ impl fmt::Display for XRow {
 }
 
 // ---------------------------------------------------------------------------
-// YRow
+// YRow (0..=7)
 // ---------------------------------------------------------------------------
 
 /// Index of a Y-register row (0..=7).
@@ -65,11 +62,6 @@ impl fmt::Display for XRow {
 pub struct YRow(u8);
 
 impl YRow {
-    /// Create a new Y-row index.
-    ///
-    /// # Errors
-    ///
-    /// Returns `RamxError::AmxOpFailed` if `index > 7`.
     #[inline]
     pub fn new(index: u8) -> crate::Result<Self> {
         if index > 7 {
@@ -81,20 +73,23 @@ impl YRow {
         }
     }
 
-    /// Create a new Y-row index without bounds checking.
-    ///
     /// # Safety
     ///
-    /// `index` must be in `0..=7`.
+    /// Caller must ensure `index <= 7`.
     #[inline]
     pub const unsafe fn new_unchecked(index: u8) -> Self {
         Self(index)
     }
 
-    /// Return the raw row index.
     #[inline]
     pub const fn index(self) -> u8 {
         self.0
+    }
+
+    /// Byte offset into the 512-byte circular Y buffer.
+    #[inline]
+    pub const fn byte_offset(self) -> u64 {
+        (self.0 as u64) * 64
     }
 }
 
@@ -105,44 +100,46 @@ impl fmt::Display for YRow {
 }
 
 // ---------------------------------------------------------------------------
-// ZRow
+// ZRow (0..=63)
 // ---------------------------------------------------------------------------
 
-/// Index of a Z-register row (0..=7).
+/// Index of a Z-register row (0..=63).
+///
+/// The Z register file has 64 rows of 64 bytes = 4096 bytes total.
+/// For f32 fma32 operations, there are 4 independent 16×16 tiles:
+/// tile 0 uses rows {0,4,8,...,60}, tile 1 uses {1,5,9,...,61}, etc.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ZRow(u8);
 
 impl ZRow {
-    /// Create a new Z-row index.
-    ///
-    /// # Errors
-    ///
-    /// Returns `RamxError::AmxOpFailed` if `index > 7`.
     #[inline]
     pub fn new(index: u8) -> crate::Result<Self> {
-        if index > 7 {
+        if index > 63 {
             Err(RamxError::AmxOpFailed(format!(
-                "ZRow index {index} out of range 0..=7"
+                "ZRow index {index} out of range 0..=63"
             )))
         } else {
             Ok(Self(index))
         }
     }
 
-    /// Create a new Z-row index without bounds checking.
-    ///
     /// # Safety
     ///
-    /// `index` must be in `0..=7`.
+    /// Caller must ensure `index <= 63`.
     #[inline]
     pub const unsafe fn new_unchecked(index: u8) -> Self {
         Self(index)
     }
 
-    /// Return the raw row index.
     #[inline]
     pub const fn index(self) -> u8 {
         self.0
+    }
+
+    /// Which of the 4 f32 tiles this row belongs to (0..=3).
+    #[inline]
+    pub const fn tile(self) -> u8 {
+        self.0 & 3
     }
 }
 
@@ -153,10 +150,9 @@ impl fmt::Display for ZRow {
 }
 
 // ---------------------------------------------------------------------------
-// Convenience const arrays for iteration
+// Convenience const arrays
 // ---------------------------------------------------------------------------
 
-/// All 8 X-register rows, in order.
 pub const ALL_X: [XRow; 8] = [
     XRow(0),
     XRow(1),
@@ -168,7 +164,6 @@ pub const ALL_X: [XRow; 8] = [
     XRow(7),
 ];
 
-/// All 8 Y-register rows, in order.
 pub const ALL_Y: [YRow; 8] = [
     YRow(0),
     YRow(1),

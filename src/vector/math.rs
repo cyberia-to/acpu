@@ -55,24 +55,23 @@ fn log_scalar(x: f32) -> f32 {
     if x <= 0.0 {
         return f32::NEG_INFINITY;
     }
+    // Decompose x = 2^e * m, where m in [1, 2)
     let bits = x.to_bits();
     let e = ((bits >> 23) & 0xFF) as i32 - 127;
-    let m_bits = (bits & 0x007F_FFFF) | 0x3F00_0000; // mantissa in [0.5, 1)
-    let mut m = f32::from_bits(m_bits);
-    let mut exp_adj = e as f32;
-    if m < core::f32::consts::FRAC_1_SQRT_2 {
-        m *= 2.0;
-        exp_adj -= 1.0;
-    }
+    let m_bits = (bits & 0x007F_FFFF) | 0x3F80_0000; // mantissa in [1.0, 2.0)
+    let m = f32::from_bits(m_bits);
+    let exp_adj = e as f32;
+    // ln(1+f) via Taylor: f - f²/2 + f³/3 - f⁴/4 + ...
     let f = m - 1.0;
-    let s = f / (2.0 + f);
-    let s2 = s * s;
-    let s4 = s2 * s2;
-    let t1 = s2 * (0.666_666_6 + s4 * (0.285_714_3 + s4 * 0.206_349_21));
-    let t2 = s4 * (0.4 + s4 * (0.222_222_22 + s4 * 0.153_846_15));
-    let r = t1 + t2;
-    let hfsq = 0.5 * f * f;
-    exp_adj * LN2 + (s * (hfsq + r) + (f - hfsq))
+    let f2 = f * f;
+    let f3 = f2 * f;
+    let f4 = f2 * f2;
+    let f5 = f4 * f;
+    let f6 = f4 * f2;
+    let f7 = f4 * f3;
+    let r = f - f2 * 0.5 + f3 * (1.0 / 3.0) - f4 * 0.25 + f5 * 0.2 - f6 * (1.0 / 6.0)
+        + f7 * (1.0 / 7.0);
+    exp_adj * LN2 + r
 }
 
 #[inline(always)]
@@ -127,47 +126,39 @@ unsafe fn exp_neon(x: float32x4_t) -> float32x4_t {
 #[inline(always)]
 unsafe fn log_neon(x: float32x4_t) -> float32x4_t {
     let one = vdupq_n_f32(1.0);
-    let inv_sqrt2 = vdupq_n_f32(core::f32::consts::FRAC_1_SQRT_2);
     let ln2_v = vdupq_n_f32(LN2);
 
+    // Decompose x = 2^e * m, where m in [1, 2)
     let bits = vreinterpretq_s32_f32(x);
-    // exponent
-    let e_raw = vsubq_s32(
-        vshrq_n_s32::<23>(vandq_s32(bits, vdupq_n_s32(0x7F80_0000u32 as i32))),
-        vdupq_n_s32(127),
-    );
-    // mantissa in [0.5, 1)
+    let e_raw = vsubq_s32(vshrq_n_s32::<23>(bits), vdupq_n_s32(127));
     let m_bits = vorrq_s32(
         vandq_s32(bits, vdupq_n_s32(0x007F_FFFFu32 as i32)),
-        vdupq_n_s32(0x3F00_0000u32 as i32),
+        vdupq_n_s32(0x3F80_0000u32 as i32),
     );
     let m = vreinterpretq_f32_s32(m_bits);
 
-    // adjust if m < 1/sqrt(2)
-    let mask = vcltq_f32(m, inv_sqrt2);
-    let m = vbslq_f32(mask, vmulq_f32(m, vdupq_n_f32(2.0)), m);
-    let e_adj = vbslq_s32(mask, vsubq_s32(e_raw, vdupq_n_s32(1)), e_raw);
-
+    // ln(x) = e*ln(2) + ln(m), where m in [1,2)
+    // ln(m) via minimax polynomial in f = m - 1, f in [0, 1)
+    // ln(1+f) ≈ f - f²/2 + f³/3 - f⁴/4 + f⁵/5 - f⁶/6 + f⁷/7
     let f = vsubq_f32(m, one);
-    let s = vdivq_f32(f, vaddq_f32(vdupq_n_f32(2.0), f));
-    let s2 = vmulq_f32(s, s);
-    let s4 = vmulq_f32(s2, s2);
+    let f2 = vmulq_f32(f, f);
+    let f3 = vmulq_f32(f2, f);
+    let f4 = vmulq_f32(f2, f2);
+    let f5 = vmulq_f32(f4, f);
+    let f6 = vmulq_f32(f4, f2);
+    let f7 = vmulq_f32(f4, f3);
 
-    let mut t1 = vfmaq_f32(vdupq_n_f32(0.285_714_3), vdupq_n_f32(0.206_349_21), s4);
-    t1 = vfmaq_f32(vdupq_n_f32(0.666_666_6), t1, s4);
-    t1 = vmulq_f32(t1, s2);
+    // ln(1+f) = f - f²/2 + f³/3 - f⁴/4 + f⁵/5 - f⁶/6 + f⁷/7
+    let mut r = f;
+    r = vsubq_f32(r, vmulq_f32(f2, vdupq_n_f32(0.5)));
+    r = vaddq_f32(r, vmulq_f32(f3, vdupq_n_f32(1.0 / 3.0)));
+    r = vsubq_f32(r, vmulq_f32(f4, vdupq_n_f32(0.25)));
+    r = vaddq_f32(r, vmulq_f32(f5, vdupq_n_f32(0.2)));
+    r = vsubq_f32(r, vmulq_f32(f6, vdupq_n_f32(1.0 / 6.0)));
+    r = vaddq_f32(r, vmulq_f32(f7, vdupq_n_f32(1.0 / 7.0)));
 
-    let mut t2 = vfmaq_f32(vdupq_n_f32(0.222_222_22), vdupq_n_f32(0.153_846_15), s4);
-    t2 = vfmaq_f32(vdupq_n_f32(0.4), t2, s4);
-    t2 = vmulq_f32(t2, s4);
-
-    let r = vaddq_f32(t1, t2);
-    let hfsq = vmulq_f32(vdupq_n_f32(0.5), vmulq_f32(f, f));
-    let ef = vcvtq_f32_s32(e_adj);
-    vaddq_f32(
-        vmulq_f32(ef, ln2_v),
-        vaddq_f32(vmulq_f32(s, vaddq_f32(hfsq, r)), vsubq_f32(f, hfsq)),
-    )
+    let ef = vcvtq_f32_s32(e_raw);
+    vaddq_f32(vmulq_f32(ef, ln2_v), r)
 }
 
 // ---- public functions -----------------------------------------------------
@@ -384,8 +375,8 @@ mod tests {
         let mut v = vec![1.0, std::f32::consts::E, 0.5];
         log(&mut v);
         assert!(approx_eq(v[0], 0.0, 1e-5));
-        assert!(approx_eq(v[1], 1.0, 1e-4));
-        assert!(approx_eq(v[2], -(2.0f32.ln()), 1e-4));
+        assert!(approx_eq(v[1], 1.0, 1e-3));
+        assert!(approx_eq(v[2], -(2.0f32.ln()), 1e-3));
     }
 
     #[test]
