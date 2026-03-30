@@ -18,20 +18,19 @@ use crate::matrix;
 
 const MR: usize = 16;
 const NR: usize = 16;
-const MC: usize = 64;
-// KC/NC chosen per-call based on matrix size.
-const KC_LARGE: usize = 512;
-const NC_LARGE: usize = 512;
-const KC_SMALL: usize = 256;
-const NC_SMALL: usize = 256;
+pub(super) const MC: usize = 64;
+pub(super) const KC_LARGE: usize = 512;
+pub(super) const NC_LARGE: usize = 512;
+pub(super) const KC_SMALL: usize = 256;
+pub(super) const NC_SMALL: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Aligned allocation
 // ---------------------------------------------------------------------------
 
-struct AlignedBuf {
-    ptr: *mut f32,
-    len: usize,
+pub(super) struct AlignedBuf {
+    pub(super) ptr: *mut f32,
+    pub(super) len: usize,
 }
 
 impl AlignedBuf {
@@ -106,10 +105,7 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Parallel sgemm: shared B packing, M-partitioned workers
-// ---------------------------------------------------------------------------
-
+/// Parallel sgemm: single scope, each thread runs full GEBP on its M-strip.
 #[cfg(target_arch = "aarch64")]
 fn sgemm_parallel(
     a: &[f32],
@@ -123,7 +119,6 @@ fn sgemm_parallel(
     let base = (m / n_threads / MR) * MR;
     let rows_per_thread = if base == 0 { MR } else { base };
 
-    // Single scope: spawn once, each thread runs full GEBP on its M-strip.
     std::thread::scope(|s| {
         let mut c_rest: &mut [f32] = c;
         let mut m_start = 0;
@@ -210,7 +205,15 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
 ///
 /// Layout: n_strips × kc × MR, where each strip is MR contiguous f32
 /// per k step. Microkernel reads directly without repacking.
-fn pack_a_mr(a: &[f32], lda: usize, ic: usize, pc: usize, mc: usize, kc: usize, dst: &mut [f32]) {
+pub(super) fn pack_a_mr(
+    a: &[f32],
+    lda: usize,
+    ic: usize,
+    pc: usize,
+    mc: usize,
+    kc: usize,
+    dst: &mut [f32],
+) {
     let n_full = mc / MR;
     let rem = mc % MR;
 
@@ -245,7 +248,15 @@ fn pack_a_mr(a: &[f32], lda: usize, ic: usize, pc: usize, mc: usize, kc: usize, 
 }
 
 /// Pack B[pc..pc+kc, jc..jc+nc] into NR-wide contiguous strips.
-fn pack_b_nr(b: &[f32], ldb: usize, pc: usize, jc: usize, kc: usize, nc: usize, dst: &mut [f32]) {
+pub(super) fn pack_b_nr(
+    b: &[f32],
+    ldb: usize,
+    pc: usize,
+    jc: usize,
+    kc: usize,
+    nc: usize,
+    dst: &mut [f32],
+) {
     let n_full = nc / NR;
     let rem = nc % NR;
 
@@ -279,7 +290,7 @@ fn pack_b_nr(b: &[f32], ldb: usize, pc: usize, jc: usize, kc: usize, nc: usize, 
 
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
-fn gebp_kernel(
+pub(super) fn gebp_kernel(
     _ctx: &matrix::AmxCtx,
     a_pack: &[f32],
     b_pack: &[f32],
