@@ -3,8 +3,8 @@
 //! All functions compute C += A × B in row-major order:
 //!   A is m×k, B is k×n, C is m×n.
 //!
-//! `sgemm` uses AMX 16×16 microkernel with GEBP cache blocking when
-//! available, falling back to scalar.
+//! `sgemm` uses AMX 16×16 microkernel with GEBP cache blocking,
+//! parallel across P-cores, falling back to scalar.
 
 mod other;
 
@@ -18,18 +18,13 @@ use crate::matrix;
 
 const MR: usize = 16;
 const NR: usize = 16;
-const MC: usize = 128;
-const KC: usize = 256;
-const NC: usize = 256;
+const MC: usize = 64;
+const KC: usize = 512;
+const NC: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Aligned allocation
 // ---------------------------------------------------------------------------
-
-/// Allocate `n` f32 values with 64-byte alignment (required by AMX loads).
-fn aligned_vec(n: usize) -> AlignedBuf {
-    AlignedBuf::new(n)
-}
 
 struct AlignedBuf {
     ptr: *mut f32,
@@ -57,14 +52,16 @@ impl AlignedBuf {
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
-    #[allow(dead_code)]
-    fn as_ptr(&self) -> *const f32 {
-        self.ptr
+    fn as_slice(&self) -> &[f32] {
+        if self.len == 0 {
+            return &[];
+        }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
 
-// AlignedBuf is a single-owner heap buffer. Safe to send across threads.
 unsafe impl Send for AlignedBuf {}
+unsafe impl Sync for AlignedBuf {}
 
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
@@ -83,10 +80,6 @@ impl Drop for AlignedBuf {
 ///
 /// Row-major: A[m×k], B[k×n], C[m×n].
 /// Parallelizes across M dimension using P-core threads when beneficial.
-///
-/// # Panics
-///
-/// Panics if slice lengths do not match dimensions.
 pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     assert_eq!(a.len(), m * k, "a.len() must equal m*k");
     assert_eq!(b.len(), k * n, "b.len() must equal k*n");
@@ -94,15 +87,14 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
 
     #[cfg(target_arch = "aarch64")]
     {
-        // Parallelize only when problem is large enough to amortize thread overhead.
-        // 2*m*n*k = FLOPS. Threshold ~16M FLOPS (roughly 200×200×200).
         let flops = 2 * m * n * k;
         let p_cores = crate::probe::detect().p_cores as usize;
-        let n_threads = p_cores.max(1).min(m / MR.max(1));
+        let max_threads = if m >= MR { m / MR } else { 1 };
+        let n_threads = p_cores.max(1).min(max_threads);
         if n_threads > 1 && flops > 16_000_000 {
             sgemm_parallel(a, b, c, m, n, k, n_threads);
         } else {
-            sgemm_amx(a, b, c, m, n, k);
+            sgemm_amx_single(a, b, c, m, n, k);
         }
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -111,7 +103,10 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     }
 }
 
-/// Parallel sgemm: partition M across threads, each with own AmxCtx.
+// ---------------------------------------------------------------------------
+// Parallel sgemm: shared B packing, M-partitioned workers
+// ---------------------------------------------------------------------------
+
 #[cfg(target_arch = "aarch64")]
 fn sgemm_parallel(
     a: &[f32],
@@ -122,22 +117,17 @@ fn sgemm_parallel(
     k: usize,
     n_threads: usize,
 ) {
-    // Align rows-per-thread to MR for clean tile boundaries.
-    let base_rows = m / n_threads;
-    let base_rows_aligned = (base_rows / MR) * MR;
-    let rows_per_thread = if base_rows_aligned == 0 {
-        MR
-    } else {
-        base_rows_aligned
-    };
+    let base = (m / n_threads / MR) * MR;
+    let rows_per_thread = if base == 0 { MR } else { base };
 
+    // Single scope: spawn once, each thread runs full GEBP on its M-strip.
     std::thread::scope(|s| {
         let mut c_rest: &mut [f32] = c;
         let mut m_start = 0;
 
         while m_start < m {
             let m_this = if m - m_start <= rows_per_thread + MR {
-                m - m_start // last thread takes all remaining (avoid tiny tail)
+                m - m_start
             } else {
                 rows_per_thread
             };
@@ -148,7 +138,7 @@ fn sgemm_parallel(
 
             s.spawn(move || {
                 let _ = crate::sync::affinity::pin_p_core();
-                sgemm_amx(a_slice, b, c_chunk, m_this, n, k);
+                sgemm_amx_single(a_slice, b, c_chunk, m_this, n, k);
             });
 
             m_start += m_this;
@@ -156,13 +146,9 @@ fn sgemm_parallel(
     });
 }
 
-// ---------------------------------------------------------------------------
-// AMX GEBP sgemm
-// ---------------------------------------------------------------------------
-
-/// AMX-accelerated sgemm with GEBP cache blocking.
+/// Single-threaded AMX sgemm (full GEBP).
 #[cfg(target_arch = "aarch64")]
-fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     let ctx = match matrix::AmxCtx::new() {
         Ok(ctx) => ctx,
         Err(_) => {
@@ -171,11 +157,8 @@ fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
         }
     };
 
-    // Pre-allocate all buffers once (64-byte aligned).
-    let mut a_pack = aligned_vec(MC * KC);
-    let mut b_pack = aligned_vec(KC * NC);
-    let mut a_micro = aligned_vec(KC * MR);
-    let mut b_micro = aligned_vec(KC * NR);
+    let mut a_pack = AlignedBuf::new(MC * KC);
+    let mut b_pack = AlignedBuf::new(KC * NC);
 
     let mut pc = 0;
     while pc < k {
@@ -184,19 +167,16 @@ fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
         let mut jc = 0;
         while jc < n {
             let nc = (n - jc).min(NC);
-
-            pack_b(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
+            pack_b_nr(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
 
             let mut ic = 0;
             while ic < m {
                 let mc = (m - ic).min(MC);
-
-                pack_a(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
-
+                pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
                 gebp_kernel(
                     &ctx,
-                    a_pack.as_mut_slice(),
-                    b_pack.as_mut_slice(),
+                    a_pack.as_slice(),
+                    b_pack.as_slice(),
                     c,
                     n,
                     ic,
@@ -204,10 +184,7 @@ fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
                     mc,
                     nc,
                     kc,
-                    a_micro.as_mut_slice(),
-                    b_micro.as_mut_slice(),
                 );
-
                 ic += mc;
             }
             jc += nc;
@@ -218,26 +195,81 @@ fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     drop(ctx);
 }
 
-/// Pack A[ic..ic+mc, pc..pc+kc] into column-major panels for AMX Y loading.
-fn pack_a(a: &[f32], lda: usize, ic: usize, pc: usize, mc: usize, kc: usize, dst: &mut [f32]) {
-    for p in 0..kc {
-        for i in 0..mc {
-            dst[p * mc + i] = a[(ic + i) * lda + pc + p];
+// ---------------------------------------------------------------------------
+// Packing: direct MR/NR-width strips (no repack needed)
+// ---------------------------------------------------------------------------
+
+/// Pack A[ic..ic+mc, pc..pc+kc] into MR-wide contiguous strips.
+///
+/// Layout: n_strips × kc × MR, where each strip is MR contiguous f32
+/// per k step. Microkernel reads directly without repacking.
+fn pack_a_mr(a: &[f32], lda: usize, ic: usize, pc: usize, mc: usize, kc: usize, dst: &mut [f32]) {
+    let n_full = mc / MR;
+    let rem = mc % MR;
+
+    // Row-major traversal: sequential reads from A (cache-friendly).
+    for s in 0..n_full {
+        let base = s * kc * MR;
+        let row_start = ic + s * MR;
+        for i in 0..MR {
+            let a_row = (row_start + i) * lda + pc;
+            for p in 0..kc {
+                dst[base + p * MR + i] = a[a_row + p];
+            }
+        }
+    }
+
+    if rem > 0 {
+        let base = n_full * kc * MR;
+        let row_start = ic + n_full * MR;
+        // Zero the full strip first, then overwrite valid rows.
+        for p in 0..kc {
+            for i in 0..MR {
+                dst[base + p * MR + i] = 0.0;
+            }
+        }
+        for i in 0..rem {
+            let a_row = (row_start + i) * lda + pc;
+            for p in 0..kc {
+                dst[base + p * MR + i] = a[a_row + p];
+            }
         }
     }
 }
 
-/// Pack B[pc..pc+kc, jc..jc+nc] row-major into panels for AMX X loading.
-#[allow(clippy::too_many_arguments)]
-fn pack_b(b: &[f32], ldb_n: usize, pc: usize, jc: usize, kc: usize, nc: usize, dst: &mut [f32]) {
-    for p in 0..kc {
-        for j in 0..nc {
-            dst[p * nc + j] = b[(pc + p) * ldb_n + jc + j];
+/// Pack B[pc..pc+kc, jc..jc+nc] into NR-wide contiguous strips.
+fn pack_b_nr(b: &[f32], ldb: usize, pc: usize, jc: usize, kc: usize, nc: usize, dst: &mut [f32]) {
+    let n_full = nc / NR;
+    let rem = nc % NR;
+
+    for s in 0..n_full {
+        let base = s * kc * NR;
+        let col_start = jc + s * NR;
+        for p in 0..kc {
+            let src_row = (pc + p) * ldb + col_start;
+            let dst_off = base + p * NR;
+            dst[dst_off..dst_off + NR].copy_from_slice(&b[src_row..src_row + NR]);
+        }
+    }
+
+    if rem > 0 {
+        let base = n_full * kc * NR;
+        let col_start = jc + n_full * NR;
+        for p in 0..kc {
+            let src_row = (pc + p) * ldb + col_start;
+            let dst_off = base + p * NR;
+            dst[dst_off..dst_off + rem].copy_from_slice(&b[src_row..src_row + rem]);
+            for j in rem..NR {
+                dst[dst_off + j] = 0.0;
+            }
         }
     }
 }
 
-/// GEBP kernel: dispatch 16×16 AMX tiles over a mc×nc×kc block.
+// ---------------------------------------------------------------------------
+// GEBP kernel: direct micropanel pointers (no repack)
+// ---------------------------------------------------------------------------
+
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
 fn gebp_kernel(
@@ -251,69 +283,71 @@ fn gebp_kernel(
     mc: usize,
     nc: usize,
     kc: usize,
-    a_micro: &mut [f32],
-    b_micro: &mut [f32],
 ) {
-    let mut ir = 0;
-    while ir + MR <= mc {
-        let mut jr = 0;
-        while jr + NR <= nc {
-            // Repack micropanels from mc/nc stride to MR/NR stride.
-            for p in 0..kc {
-                a_micro[p * MR..p * MR + MR]
-                    .copy_from_slice(&a_pack[p * mc + ir..p * mc + ir + MR]);
-            }
-            for p in 0..kc {
-                b_micro[p * NR..p * NR + NR]
-                    .copy_from_slice(&b_pack[p * nc + jr..p * nc + jr + NR]);
-            }
+    let n_mr = mc.div_ceil(MR);
+    let n_nr = nc.div_ceil(NR);
 
-            unsafe {
-                matrix::tile::microkernel_16x16(
-                    a_micro.as_ptr() as *const u8,
-                    b_micro.as_ptr() as *const u8,
-                    kc,
+    for ir_strip in 0..n_mr {
+        let ir = ir_strip * MR;
+        let mr_actual = MR.min(mc - ir);
+
+        for jr_strip in 0..n_nr {
+            let jr = jr_strip * NR;
+            let nr_actual = NR.min(nc - jr);
+
+            // Direct pointers into packed buffers (no copy needed).
+            let a_ptr = unsafe { a_pack.as_ptr().add(ir_strip * kc * MR) as *const u8 };
+            let b_ptr = unsafe { b_pack.as_ptr().add(jr_strip * kc * NR) as *const u8 };
+
+            if mr_actual == MR && nr_actual == NR {
+                // Full 16×16 tile: AMX microkernel.
+                unsafe {
+                    matrix::tile::microkernel_16x16(a_ptr, b_ptr, kc);
+                    let c_ptr = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
+                    matrix::tile::accumulate_tile_16x16(c_ptr, n);
+                }
+            } else {
+                // Edge tile: scalar fallback.
+                edge_kernel(
+                    a_pack, b_pack, c, n, ic, jc, ir_strip, jr_strip, mr_actual, nr_actual, kc, mc,
                 );
-
-                let c_ptr = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
-                matrix::tile::accumulate_tile_16x16(c_ptr, n);
-            }
-
-            jr += NR;
-        }
-
-        // Handle remaining columns (< NR) with scalar.
-        if jr < nc {
-            for i in ir..ir + MR {
-                for j in jr..nc {
-                    let mut acc = 0.0f32;
-                    for p in 0..kc {
-                        acc += a_pack[p * mc + i] * b_pack[p * nc + j];
-                    }
-                    c[(ic + i) * n + jc + j] += acc;
-                }
-            }
-        }
-
-        ir += MR;
-    }
-
-    // Handle remaining rows (< MR) with scalar.
-    if ir < mc {
-        for i in ir..mc {
-            for j in 0..nc {
-                let mut acc = 0.0f32;
-                for p in 0..kc {
-                    acc += a_pack[p * mc + i] * b_pack[p * nc + j];
-                }
-                c[(ic + i) * n + jc + j] += acc;
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn edge_kernel(
+    a_pack: &[f32],
+    b_pack: &[f32],
+    c: &mut [f32],
+    n: usize,
+    ic: usize,
+    jc: usize,
+    ir_strip: usize,
+    jr_strip: usize,
+    mr: usize,
+    nr: usize,
+    kc: usize,
+    _mc: usize,
+) {
+    let ir = ir_strip * MR;
+    let jr = jr_strip * NR;
+    for i in 0..mr {
+        for j in 0..nr {
+            let mut acc = 0.0f32;
+            for p in 0..kc {
+                let av = a_pack[ir_strip * kc * MR + p * MR + i];
+                let bv = b_pack[jr_strip * kc * NR + p * NR + j];
+                acc += av * bv;
+            }
+            c[(ic + ir + i) * n + jc + jr + j] += acc;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// NEON fallback sgemm
+// Fallbacks
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "aarch64")]
@@ -331,7 +365,6 @@ fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize)
     }
 }
 
-/// Scalar fallback sgemm.
 #[allow(dead_code)]
 fn sgemm_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     for i in 0..m {
@@ -360,7 +393,6 @@ mod tests {
         let mut b = vec![0.0f32; N * N];
         let mut c = vec![0.0f32; N * N];
 
-        // A = all ones, B = identity.
         for i in 0..N {
             for j in 0..N {
                 a[i * N + j] = 1.0;
@@ -382,8 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn sgemm_small_neon_path() {
-        // 4×4 should take scalar path (< MR).
+    fn sgemm_small() {
         const N: usize = 4;
         let a: Vec<f32> = (1..=16).map(|x| x as f32).collect();
         let b = vec![
@@ -417,5 +448,28 @@ mod tests {
                 c_ref[i]
             );
         }
+    }
+
+    #[test]
+    fn sgemm_large_parallel() {
+        const M: usize = 256;
+        const N: usize = 256;
+        const K: usize = 256;
+        let a: Vec<f32> = (0..M * K).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
+        let b: Vec<f32> = (0..K * N).map(|i| ((i % 17) as f32 - 8.0) * 0.01).collect();
+        let mut c_par = vec![0.0f32; M * N];
+        let mut c_ref = vec![0.0f32; M * N];
+
+        sgemm(&a, &b, &mut c_par, M, N, K);
+        sgemm_scalar(&a, &b, &mut c_ref, M, N, K);
+
+        let mut max_err = 0.0f32;
+        for i in 0..M * N {
+            let err = (c_par[i] - c_ref[i]).abs();
+            if err > max_err {
+                max_err = err;
+            }
+        }
+        assert!(max_err < 0.1, "parallel sgemm 256x256: max_err={max_err}");
     }
 }

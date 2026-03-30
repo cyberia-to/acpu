@@ -37,7 +37,8 @@ pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize
     let mut p = 0usize;
     // Process 8 rank-1 updates at a time (fills all 8 X/Y registers).
     while p + 8 <= k {
-        // Load 8 rows of B into X[0..7] and 8 columns of A into Y[0..7].
+        // Interleave loads and FMAs: load pair, then FMA previous pair.
+        // First batch: just load all 8.
         for i in 0u8..8 {
             let b_ptr = b_panel.add((p + i as usize) * 64);
             let a_ptr = a_panel.add((p + i as usize) * 64);
@@ -92,37 +93,48 @@ pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize
 /// - `dst` must point to at least 16×64 = 1024 writable bytes, 64-byte aligned.
 #[inline]
 pub unsafe fn store_tile_16x16(dst: *mut u8) {
-    // Z tile 0 uses rows 0, 4, 8, ..., 60.
-    // Row j of the 16×16 result is in Z row j*4.
     for j in 0u8..16 {
-        let z_row = j * 4; // Z rows: 0, 4, 8, ..., 60
+        let z_row = j * 4;
         amx_op::<OP_STZ>((dst.add(j as usize * 64) as u64) | ((z_row as u64) << 56));
     }
 }
 
 /// Add the 16×16 result from Z tile 0 into an existing row-major f32 buffer.
 ///
-/// Loads existing C values, adds Z tile contents, stores back.
+/// Uses NEON vector adds (4-wide) instead of scalar for ~4× faster accumulate.
 ///
 /// # Safety
 ///
 /// - AMX must be active.
-/// - `dst` must point to at least 16×64 = 1024 readable+writable bytes.
+/// - `c` must point to valid f32 data with stride `ldc`.
 #[inline]
 pub unsafe fn accumulate_tile_16x16(c: *mut f32, ldc: usize) {
-    // For each row j of the 16×16 tile, stored in Z row j*4:
-    // Read Z row into a temp, add to C row, write back.
-    // We use a stack buffer to extract Z rows.
-    let mut z_row_buf = [0f32; 16];
-    let z_ptr = z_row_buf.as_mut_ptr() as *mut u8;
+    #[repr(align(64))]
+    struct Aligned64([f32; 16]);
+
+    let mut zbuf = Aligned64([0f32; 16]);
+    let z_ptr = zbuf.0.as_mut_ptr() as *mut u8;
 
     for j in 0u8..16 {
         let z_row = j * 4;
         amx_op::<OP_STZ>((z_ptr as u64) | ((z_row as u64) << 56));
 
         let c_row = c.add(j as usize * ldc);
-        for (i, &zv) in z_row_buf.iter().enumerate() {
-            *c_row.add(i) += zv;
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            use core::arch::aarch64::{vaddq_f32, vld1q_f32, vst1q_f32};
+            for q in 0..4usize {
+                let existing = vld1q_f32(c_row.add(q * 4));
+                let z_val = vld1q_f32(zbuf.0.as_ptr().add(q * 4));
+                vst1q_f32(c_row.add(q * 4), vaddq_f32(existing, z_val));
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for i in 0..16 {
+                *c_row.add(i) += zbuf.0[i];
+            }
         }
     }
 }
