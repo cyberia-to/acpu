@@ -83,6 +83,13 @@ pub unsafe fn microkernel_16x32(
 
     // Batch of 4: 4Y + 4X(left) + 4X(right) = 4Y + 8X = all registers used.
     while p + 4 <= k {
+        // Prefetch next batch.
+        if p + 8 <= k {
+            crate::sync::prefetch::prefetch_l1(a_panel.add((p + 4) * 64));
+            crate::sync::prefetch::prefetch_l1(b_left.add((p + 4) * 64));
+            crate::sync::prefetch::prefetch_l1(b_right.add((p + 4) * 64));
+        }
+
         for i in 0u8..4 {
             amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
         }
@@ -108,7 +115,7 @@ pub unsafe fn microkernel_16x32(
             );
         }
 
-        // FMA tile 1 (reuses Y[0..3] from above)
+        // FMA tile 1 (reuses Y[0..3])
         if first_t1 {
             amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(4), YRow::new_unchecked(0), 1));
             first_t1 = false;
