@@ -1,4 +1,4 @@
-//! ramx — pure Rust driver for Apple Silicon CPU compute
+//! acpu — pure Rust driver for Apple Silicon CPU compute
 //!
 //! direct access to every useful compute unit in M1–M4:
 //! matrix coprocessor (AMX), vector engine (NEON), numeric
@@ -25,7 +25,7 @@ pub use sync::{affinity, prefetch};
 
 use std::fmt;
 
-/// all ramx errors
+/// all acpu errors
 #[derive(Debug)]
 pub enum RamxError {
     /// running on non-Apple-Silicon hardware

@@ -83,7 +83,7 @@ fn event_selector(c: Counter) -> u64 {
 /// # Example
 ///
 /// ```no_run
-/// use ramx::pulse::{Counter, PulseCtx};
+/// use acpu::pulse::{Counter, PulseCtx};
 ///
 /// let mut ctx = PulseCtx::new(&[Counter::Cycles, Counter::Instructions]).unwrap();
 /// ctx.start();

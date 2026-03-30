@@ -1,4 +1,4 @@
-# ramx — API specification
+# acpu — API specification
 
 pure Rust driver for Apple Silicon CPU compute. direct access to
 every useful compute unit in M1–M4: matrix coprocessor, vector
@@ -202,8 +202,8 @@ ARM Advanced SIMD. 32 registers × 128 bits. documented, stable,
 available on all AArch64. accessed via `core::arch::aarch64`
 intrinsics or inline assembly.
 
-ramx exposes NEON through typed kernel functions, not raw
-intrinsics. the user calls `ramx::exp(slice)`, not
+acpu exposes NEON through typed kernel functions, not raw
+intrinsics. the user calls `acpu::exp(slice)`, not
 `vfmaq_f32(a, b, c)`.
 
 ## register file
@@ -221,7 +221,7 @@ v0–v31:  128-bit SIMD registers
 
 ## operations used
 
-not a full NEON reference — only the instruction classes ramx uses.
+not a full NEON reference — only the instruction classes acpu uses.
 
 | class | instructions | what for |
 |-------|-------------|----------|
@@ -351,10 +351,10 @@ essential for lock-free thread pool in parallel GEMM.
 
 LSE atomics are used automatically by LLVM on AArch64 when
 `-Ctarget-feature=+lse` is set (default on macOS). `std::sync::atomic`
-operations compile to single LSE instructions. ramx does not wrap
+operations compile to single LSE instructions. acpu does not wrap
 these — Rust already does the right thing.
 
-ramx exposes LSE through the sync module only where the standard
+acpu exposes LSE through the sync module only where the standard
 library is insufficient (e.g. custom fence patterns, spin-wait
 with WFE).
 
@@ -561,13 +561,13 @@ AffinityFailed(String)   QoS class change failed
 - all kernels are synchronous. no async dispatch model (this is CPU, not GPU)
 - parallel GEMM: partition M dimension across threads, each thread gets own AmxCtx
 - sync between threads: WFE/SEV + LSE atomics (no mutexes in hot path)
-- memory: all buffers are caller-owned slices. ramx allocates nothing on heap
+- memory: all buffers are caller-owned slices. acpu allocates nothing on heap
 - all public functions are `#[inline]` or dispatch through cached function pointers
 
 ## driver stack
 
 ```
-ramx crate
+acpu crate
   → inline asm (.word for AMX, intrinsics for NEON)
   → sysctl (chip detection)
   → libkperf.dylib dlopen (PMU counters)
@@ -609,7 +609,7 @@ src/
   gemm.rs             sgemm, hgemm, bgemm, qgemm (auto-dispatch)
   convert.rs          cvt_* bulk conversion (re-exports from numeric)
   probe/
-    main.rs           ramx_probe binary — exercise every organ
+    main.rs           acpu_probe binary — exercise every organ
 ```
 
 file limit: 500 lines per source file. split if exceeded.

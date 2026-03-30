@@ -1,8 +1,8 @@
-//! Comprehensive integration tests for every module of the ramx crate.
+//! Comprehensive integration tests for every module of the acpu crate.
 
-use ramx::numeric::{bf16 as bf16_mod, fp16 as fp16_mod, quant};
-use ramx::vector::{math, reduce, rope, softmax};
-use ramx::{gemm, matrix, probe, sync::affinity};
+use acpu::numeric::{bf16 as bf16_mod, fp16 as fp16_mod, quant};
+use acpu::vector::{math, reduce, rope, softmax};
+use acpu::{gemm, matrix, probe, sync::affinity};
 
 // === helpers ================================================================
 

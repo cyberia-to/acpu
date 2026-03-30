@@ -39,7 +39,7 @@ cargo run --example matmul                # verify AMX access
 
 every commit: format clean, clippy clean, builds, examples run.
 
-## project: ramx
+## project: acpu
 
 pure Rust driver for Apple Silicon CPU compute. direct access to
 AMX matrix coprocessor, NEON vector engine, numeric extensions
@@ -82,7 +82,7 @@ src/
   gemm.rs             sgemm, hgemm, bgemm, qgemm (auto-dispatch)
   convert.rs          bulk conversion re-exports
   probe/
-    main.rs           ramx_probe binary
+    main.rs           acpu_probe binary
 examples/
   matmul.rs           AMX matrix multiply demo
 specs/
@@ -102,7 +102,7 @@ in specs/ first, then propagate to code.
 - NEON registers v8–v15 are callee-saved. inline asm must respect this.
 - PMU access requires dlopen of libkperf.dylib (same pattern as rane).
 - core affinity uses QoS classes, not hard pinning.
-- all public functions operate on caller-owned slices. ramx allocates nothing.
+- all public functions operate on caller-owned slices. acpu allocates nothing.
 - target: aarch64-apple-darwin only. not cross-platform.
 
 ## do not touch

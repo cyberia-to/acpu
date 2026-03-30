@@ -1,4 +1,4 @@
-//! Simple 64x64 matrix multiply example using ramx::sgemm.
+//! Simple 64x64 matrix multiply example using acpu::sgemm.
 //!
 //! Run with: `cargo run --example matmul --release`
 
@@ -18,7 +18,7 @@ fn main() {
     let mut c = vec![0.0f32; N * N];
 
     let start = std::time::Instant::now();
-    ramx::sgemm(&a, &b, &mut c, N, N, N);
+    acpu::sgemm(&a, &b, &mut c, N, N, N);
     let elapsed = start.elapsed();
 
     // Verify: C should equal A (all ones) since B is identity.
@@ -30,7 +30,7 @@ fn main() {
         }
     }
 
-    println!("ramx::sgemm {N}x{N} x {N}x{N}");
+    println!("acpu::sgemm {N}x{N} x {N}x{N}");
     println!("  elapsed:   {:.3?}", elapsed);
     println!("  max error: {:.2e}", max_err);
 

@@ -1,17 +1,17 @@
 [package]
-name = "ramx"
+name = "acpu"
 version = "0.1.0"
 edition = "2021"
 description = "pure Rust driver for Apple Silicon CPU compute — AMX, NEON, numeric extensions, sync, PMU"
 license = "LicenseRef-Cyber"
-repository = "https://github.com/cyberia-to/ramx"
+repository = "https://github.com/cyberia-to/acpu"
 
 [lib]
-name = "ramx"
+name = "acpu"
 path = "src/lib.rs"
 
 [[bin]]
-name = "ramx_probe"
+name = "acpu_probe"
 path = "src/probe/main.rs"
 
 [[example]]

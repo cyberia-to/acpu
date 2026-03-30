@@ -1,4 +1,4 @@
-//! Benchmark ramx::sgemm vs Apple Accelerate cblas_sgemm.
+//! Benchmark acpu::sgemm vs Apple Accelerate cblas_sgemm.
 //!
 //! Run with: `cargo run --example bench_sgemm --release`
 
@@ -50,7 +50,7 @@ fn gflops(m: usize, n: usize, k: usize, dur: Duration) -> f64 {
 fn main() {
     println!(
         "{:>5} | {:>10} | {:>10} | {:>8} | {:>8} | {:>5}",
-        "size", "ramx_us", "accel_us", "ramx_gf", "accel_gf", "ratio"
+        "size", "acpu_us", "accel_us", "acpu_gf", "accel_gf", "ratio"
     );
     println!("{}", "-".repeat(62));
 
@@ -70,10 +70,10 @@ fn main() {
         let a: Vec<f32> = (0..m * k).map(|_| randf()).collect();
         let b: Vec<f32> = (0..k * n).map(|_| randf()).collect();
 
-        // -- ramx --
-        let ramx_dur = bench_median(|| {
+        // -- acpu --
+        let acpu_dur = bench_median(|| {
             let mut c = vec![0.0f32; m * n];
-            ramx::sgemm(&a, &b, &mut c, m, n, k);
+            acpu::sgemm(&a, &b, &mut c, m, n, k);
             std::hint::black_box(&c);
         });
 
@@ -101,15 +101,15 @@ fn main() {
             std::hint::black_box(&c);
         });
 
-        let ramx_us = ramx_dur.as_nanos() as f64 / 1000.0;
+        let acpu_us = acpu_dur.as_nanos() as f64 / 1000.0;
         let accel_us = accel_dur.as_nanos() as f64 / 1000.0;
-        let ratio = ramx_us / accel_us;
-        let ramx_gf = gflops(m, n, k, ramx_dur);
+        let ratio = acpu_us / accel_us;
+        let acpu_gf = gflops(m, n, k, acpu_dur);
         let accel_gf = gflops(m, n, k, accel_dur);
 
         println!(
             "{:>5} | {:>10.1} | {:>10.1} | {:>8.2} | {:>8.2} | {:>5.2}x",
-            sz, ramx_us, accel_us, ramx_gf, accel_gf, ratio
+            sz, acpu_us, accel_us, acpu_gf, accel_gf, ratio
         );
     }
 }

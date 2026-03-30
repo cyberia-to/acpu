@@ -1,16 +1,16 @@
-//! ramx_probe — diagnostic binary that detects the chip and exercises
-//! each subsystem ("organ") of the ramx crate.
+//! acpu_probe — diagnostic binary that detects the chip and exercises
+//! each subsystem ("organ") of the acpu crate.
 //!
-//! Run with: `cargo run --bin ramx_probe`
+//! Run with: `cargo run --bin acpu_probe`
 
 fn main() {
-    println!("=== ramx_probe ===\n");
+    println!("=== acpu_probe ===\n");
 
     // -----------------------------------------------------------------------
     // Level 1: Capabilities
     // -----------------------------------------------------------------------
     println!("[1] Capabilities");
-    let caps = ramx::probe::detect();
+    let caps = acpu::probe::detect();
     println!("  chip:       {}", caps.chip);
     println!("  AMX ver:    {}", caps.amx_ver);
     println!("  P-cores:    {}", caps.p_cores);
@@ -84,8 +84,8 @@ fn main() {
 
 fn amx_set_clr_test() -> Result<(), String> {
     unsafe {
-        ramx::matrix::asm::amx_set();
-        ramx::matrix::asm::amx_clr();
+        acpu::matrix::asm::amx_set();
+        acpu::matrix::asm::amx_clr();
     }
     Ok(())
 }
@@ -117,10 +117,10 @@ fn amx_fma_test() -> Result<(), String> {
     struct ZBuf([u8; 512]); // 8 × 64 bytes
     let mut z_all = ZBuf([0u8; 512]);
 
-    let ctx = ramx::AmxCtx::new().map_err(|e| format!("{e}"))?;
+    let ctx = acpu::AmxCtx::new().map_err(|e| format!("{e}"))?;
 
     unsafe {
-        use ramx::matrix::regs::*;
+        use acpu::matrix::regs::*;
 
         ctx.ldx(x_buf.0.as_ptr(), XRow::new_unchecked(0));
         ctx.ldy(y_buf.0.as_ptr(), YRow::new_unchecked(0));
@@ -167,7 +167,7 @@ fn neon_sgemm_test() -> Result<(), String> {
     }
     let mut c = vec![0.0f32; N * N];
 
-    ramx::sgemm(&a, &b, &mut c, N, N, N);
+    acpu::sgemm(&a, &b, &mut c, N, N, N);
 
     for i in 0..N * N {
         if (c[i] - a[i]).abs() > 1e-4 {
@@ -181,7 +181,7 @@ fn neon_sgemm_test() -> Result<(), String> {
 }
 
 fn pmu_test() -> Result<(), String> {
-    use ramx::pulse::{Counter, PulseCtx};
+    use acpu::pulse::{Counter, PulseCtx};
 
     let mut ctx =
         PulseCtx::new(&[Counter::Cycles, Counter::Instructions]).map_err(|e| format!("{e}"))?;
