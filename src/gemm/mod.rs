@@ -158,7 +158,6 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
     // Adaptive blocking: large KC for big K, small for small K.
     let kc_max = if k > 256 { KC_LARGE } else { KC_SMALL };
     let nc_max = if n > 256 { NC_LARGE } else { NC_SMALL };
-
     let mut a_pack = AlignedBuf::new(MC * kc_max);
     let mut b_pack = AlignedBuf::new(kc_max * nc_max);
 
@@ -217,14 +216,21 @@ pub(super) fn pack_a_mr(
     let n_full = mc / MR;
     let rem = mc % MR;
 
-    // Row-major traversal: sequential reads from A (cache-friendly).
     for s in 0..n_full {
         let base = s * kc * MR;
         let row_start = ic + s * MR;
-        for i in 0..MR {
-            let a_row = (row_start + i) * lda + pc;
-            for p in 0..kc {
-                dst[base + p * MR + i] = a[a_row + p];
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            pack_a_strip_neon(a, lda, row_start, pc, kc, &mut dst[base..]);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            for i in 0..MR {
+                let a_row = (row_start + i) * lda + pc;
+                for p in 0..kc {
+                    dst[base + p * MR + i] = a[a_row + p];
+                }
             }
         }
     }
@@ -243,6 +249,78 @@ pub(super) fn pack_a_mr(
             for p in 0..kc {
                 dst[base + p * MR + i] = a[a_row + p];
             }
+        }
+    }
+}
+
+/// NEON-accelerated pack: 4×4 transpose blocks for one MR-wide strip.
+#[cfg(target_arch = "aarch64")]
+fn pack_a_strip_neon(
+    a: &[f32],
+    lda: usize,
+    row_start: usize,
+    pc: usize,
+    kc: usize,
+    dst: &mut [f32],
+) {
+    use core::arch::aarch64::*;
+
+    // Process 4 rows × 4 columns at a time using NEON transpose.
+    // MR=16 → 4 groups of 4 rows. kc → kc/4 groups of 4 columns.
+    for ig in 0..(MR / 4) {
+        let i = ig * 4;
+        let a0 = (row_start + i) * lda + pc;
+        let a1 = (row_start + i + 1) * lda + pc;
+        let a2 = (row_start + i + 2) * lda + pc;
+        let a3 = (row_start + i + 3) * lda + pc;
+
+        let mut p = 0;
+        while p + 4 <= kc {
+            unsafe {
+                let r0 = vld1q_f32(a.as_ptr().add(a0 + p));
+                let r1 = vld1q_f32(a.as_ptr().add(a1 + p));
+                let r2 = vld1q_f32(a.as_ptr().add(a2 + p));
+                let r3 = vld1q_f32(a.as_ptr().add(a3 + p));
+
+                // 4×4 transpose via zip1/zip2 at f32 and f64 granularity.
+                let lo01 = vzip1q_f32(r0, r1);
+                let hi01 = vzip2q_f32(r0, r1);
+                let lo23 = vzip1q_f32(r2, r3);
+                let hi23 = vzip2q_f32(r2, r3);
+
+                let c0 = vreinterpretq_f32_f64(vzip1q_f64(
+                    vreinterpretq_f64_f32(lo01),
+                    vreinterpretq_f64_f32(lo23),
+                ));
+                let c1 = vreinterpretq_f32_f64(vzip2q_f64(
+                    vreinterpretq_f64_f32(lo01),
+                    vreinterpretq_f64_f32(lo23),
+                ));
+                let c2 = vreinterpretq_f32_f64(vzip1q_f64(
+                    vreinterpretq_f64_f32(hi01),
+                    vreinterpretq_f64_f32(hi23),
+                ));
+                let c3 = vreinterpretq_f32_f64(vzip2q_f64(
+                    vreinterpretq_f64_f32(hi01),
+                    vreinterpretq_f64_f32(hi23),
+                ));
+
+                let d = dst.as_mut_ptr();
+                vst1q_f32(d.add(p * MR + i), c0);
+                vst1q_f32(d.add((p + 1) * MR + i), c1);
+                vst1q_f32(d.add((p + 2) * MR + i), c2);
+                vst1q_f32(d.add((p + 3) * MR + i), c3);
+            }
+            p += 4;
+        }
+
+        // Remainder columns: scalar.
+        while p < kc {
+            dst[p * MR + i] = a[a0 + p];
+            dst[p * MR + i + 1] = a[a1 + p];
+            dst[p * MR + i + 2] = a[a2 + p];
+            dst[p * MR + i + 3] = a[a3 + p];
+            p += 1;
         }
     }
 }
