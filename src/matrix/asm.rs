@@ -86,18 +86,17 @@ pub const OP_EXTRH: u32 = 8;
 /// Extract vertical slice (M4+).
 pub const OP_EXTRV: u32 = 9;
 
+/// Fused multiply-accumulate, f64.
+pub const OP_FMA64: u32 = 10;
+/// Fused multiply-subtract, f64.
+pub const OP_FMS64: u32 = 11;
 /// Fused multiply-accumulate, f32.
-pub const OP_FMA32: u32 = 10;
-/// Fused multiply-accumulate, f16.
-pub const OP_FMA16: u32 = 11;
-/// Fused multiply-accumulate, bf16.
-pub const OP_FMABF16: u32 = 12;
+pub const OP_FMA32: u32 = 12;
+/// Fused multiply-subtract, f32.
+pub const OP_FMS32: u32 = 13;
 /// Multiply-accumulate, i16.
-pub const OP_MAC16: u32 = 13;
-
-/// Matrix integer (M3+).
-pub const OP_MATINT: u32 = 14;
-/// Vector floating-point (M4+).
-pub const OP_VECFP: u32 = 15;
-/// Vector integer (M4+).
-pub const OP_VECINT: u32 = 16;
+pub const OP_MAC16: u32 = 14;
+/// Fused multiply-accumulate, f16.
+pub const OP_FMA16: u32 = 15;
+/// Fused multiply-subtract, f16.
+pub const OP_FMS16: u32 = 16;

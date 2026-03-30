@@ -4,8 +4,7 @@
 //! guarantees the coprocessor is active for the duration of the call.
 
 use super::asm::{
-    self, OP_FMA16, OP_FMA32, OP_FMABF16, OP_LDX, OP_LDY, OP_LDZ, OP_LDZI, OP_MAC16, OP_STX,
-    OP_STY, OP_STZ,
+    self, OP_FMA16, OP_FMA32, OP_LDX, OP_LDY, OP_LDZ, OP_LDZI, OP_MAC16, OP_STX, OP_STY, OP_STZ,
 };
 use super::regs::{XRow, YRow, ZRow};
 use super::AmxCtx;
@@ -133,16 +132,6 @@ impl AmxCtx {
     #[inline]
     pub unsafe fn fma16(&self, operand: u64) {
         asm::amx_op::<OP_FMA16>(operand);
-    }
-
-    /// Fused multiply-accumulate on bf16 lanes.
-    ///
-    /// # Safety
-    ///
-    /// `operand` must be a validly packed FMABF16 operand word.
-    #[inline]
-    pub unsafe fn fmabf16(&self, operand: u64) {
-        asm::amx_op::<OP_FMABF16>(operand);
     }
 
     /// Multiply-accumulate on i16 lanes.

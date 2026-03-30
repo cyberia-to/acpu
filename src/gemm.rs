@@ -4,7 +4,7 @@
 //!   A is m×k, B is k×n, C is m×n.
 //!
 //! `sgemm` uses AMX 16×16 microkernel with GEBP cache blocking when
-//! available, falling back to NEON.
+//! available, falling back to scalar.
 
 use crate::matrix;
 
@@ -12,17 +12,61 @@ use crate::matrix;
 // GEBP blocking parameters (tuned for Apple Silicon L1/L2)
 // ---------------------------------------------------------------------------
 
-// AMX GEBP parameters (used by sgemm_amx, experimental).
-#[allow(dead_code)]
 const MR: usize = 16;
-#[allow(dead_code)]
 const NR: usize = 16;
-#[allow(dead_code)]
 const MC: usize = 128;
-#[allow(dead_code)]
 const KC: usize = 256;
-#[allow(dead_code)]
 const NC: usize = 256;
+
+// ---------------------------------------------------------------------------
+// Aligned allocation
+// ---------------------------------------------------------------------------
+
+/// Allocate `n` f32 values with 64-byte alignment (required by AMX loads).
+fn aligned_vec(n: usize) -> AlignedBuf {
+    AlignedBuf::new(n)
+}
+
+struct AlignedBuf {
+    ptr: *mut f32,
+    len: usize,
+}
+
+impl AlignedBuf {
+    fn new(n: usize) -> Self {
+        if n == 0 {
+            return Self {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            };
+        }
+        let layout = std::alloc::Layout::from_size_align(n * 4, 64).unwrap();
+        let ptr = unsafe { std::alloc::alloc_zeroed(layout) as *mut f32 };
+        assert!(!ptr.is_null(), "aligned allocation failed");
+        Self { ptr, len: n }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [f32] {
+        if self.len == 0 {
+            return &mut [];
+        }
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+
+    #[allow(dead_code)]
+    fn as_ptr(&self) -> *const f32 {
+        self.ptr
+    }
+}
+
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() && self.len > 0 {
+            let layout = std::alloc::Layout::from_size_align(self.len * 4, 64).unwrap();
+            unsafe { std::alloc::dealloc(self.ptr as *mut u8, layout) };
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // sgemm — f32 matmul
@@ -42,9 +86,7 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
 
     #[cfg(target_arch = "aarch64")]
     {
-        // AMX microkernel is experimental; use NEON for now.
-        // To enable AMX: call sgemm_amx directly.
-        sgemm_neon(a, b, c, m, n, k);
+        sgemm_amx(a, b, c, m, n, k);
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
@@ -56,55 +98,53 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
 // AMX GEBP sgemm
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 /// AMX-accelerated sgemm with GEBP cache blocking.
-///
-/// 1. Slice K into panels of KC.
-/// 2. For each K-panel, pack B columns into column-panels of NC.
-/// 3. For each B-panel, pack A rows into row-panels of MC.
-/// 4. For each 16×16 tile intersection, run AMX microkernel.
 #[cfg(target_arch = "aarch64")]
 fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    // Packing buffers (on stack for small, heap for large).
-    // A panel: MC × KC, stored column-major for Y register loading.
-    // B panel: KC × NC, stored row-major for X register loading.
-
     let ctx = match matrix::AmxCtx::new() {
         Ok(ctx) => ctx,
         Err(_) => {
-            // AMX not available, fall back to NEON.
             sgemm_neon(a, b, c, m, n, k);
             return;
         }
     };
 
-    // Aligned packing buffers.
-    let mut a_pack = vec![0f32; MC * KC];
-    let mut b_pack = vec![0f32; KC * NC];
+    // Pre-allocate all buffers once (64-byte aligned).
+    let mut a_pack = aligned_vec(MC * KC);
+    let mut b_pack = aligned_vec(KC * NC);
+    let mut a_micro = aligned_vec(KC * MR);
+    let mut b_micro = aligned_vec(KC * NR);
 
-    // GEBP: iterate over K in slices of KC.
     let mut pc = 0;
     while pc < k {
         let kc = (k - pc).min(KC);
 
-        // Iterate over N in slices of NC.
         let mut jc = 0;
         while jc < n {
             let nc = (n - jc).min(NC);
 
-            // Pack B[pc..pc+kc, jc..jc+nc] row-major into b_pack.
-            pack_b(b, k, n, pc, jc, kc, nc, &mut b_pack);
+            pack_b(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
 
-            // Iterate over M in slices of MC.
             let mut ic = 0;
             while ic < m {
                 let mc = (m - ic).min(MC);
 
-                // Pack A[ic..ic+mc, pc..pc+kc] column-major into a_pack.
-                pack_a(a, k, ic, pc, mc, kc, &mut a_pack);
+                pack_a(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
 
-                // Micro-tile loop.
-                gebp_kernel(&ctx, &a_pack, &b_pack, c, m, n, ic, jc, mc, nc, kc);
+                gebp_kernel(
+                    &ctx,
+                    a_pack.as_mut_slice(),
+                    b_pack.as_mut_slice(),
+                    c,
+                    n,
+                    ic,
+                    jc,
+                    mc,
+                    nc,
+                    kc,
+                    a_micro.as_mut_slice(),
+                    b_micro.as_mut_slice(),
+                );
 
                 ic += mc;
             }
@@ -117,10 +157,6 @@ fn sgemm_amx(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
 }
 
 /// Pack A[ic..ic+mc, pc..pc+kc] into column-major panels for AMX Y loading.
-///
-/// Output layout: for each column p in 0..kc, store mc f32 values
-/// contiguously (so a 64-byte load gets 16 consecutive rows of that column).
-#[allow(dead_code)]
 fn pack_a(a: &[f32], lda: usize, ic: usize, pc: usize, mc: usize, kc: usize, dst: &mut [f32]) {
     for p in 0..kc {
         for i in 0..mc {
@@ -130,20 +166,8 @@ fn pack_a(a: &[f32], lda: usize, ic: usize, pc: usize, mc: usize, kc: usize, dst
 }
 
 /// Pack B[pc..pc+kc, jc..jc+nc] row-major into panels for AMX X loading.
-///
-/// Output layout: for each row p in 0..kc, store nc f32 values
-/// contiguously (so a 64-byte load gets 16 consecutive columns).
-#[allow(dead_code, clippy::too_many_arguments)]
-fn pack_b(
-    b: &[f32],
-    _ldb_k: usize,
-    ldb_n: usize,
-    pc: usize,
-    jc: usize,
-    kc: usize,
-    nc: usize,
-    dst: &mut [f32],
-) {
+#[allow(clippy::too_many_arguments)]
+fn pack_b(b: &[f32], ldb_n: usize, pc: usize, jc: usize, kc: usize, nc: usize, dst: &mut [f32]) {
     for p in 0..kc {
         for j in 0..nc {
             dst[p * nc + j] = b[(pc + p) * ldb_n + jc + j];
@@ -153,53 +177,42 @@ fn pack_b(
 
 /// GEBP kernel: dispatch 16×16 AMX tiles over a mc×nc×kc block.
 #[cfg(target_arch = "aarch64")]
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn gebp_kernel(
     _ctx: &matrix::AmxCtx,
     a_pack: &[f32],
     b_pack: &[f32],
     c: &mut [f32],
-    _m: usize,
     n: usize,
     ic: usize,
     jc: usize,
     mc: usize,
     nc: usize,
     kc: usize,
+    a_micro: &mut [f32],
+    b_micro: &mut [f32],
 ) {
     let mut ir = 0;
     while ir + MR <= mc {
         let mut jr = 0;
         while jr + NR <= nc {
+            // Repack micropanels from mc/nc stride to MR/NR stride.
+            for p in 0..kc {
+                a_micro[p * MR..p * MR + MR]
+                    .copy_from_slice(&a_pack[p * mc + ir..p * mc + ir + MR]);
+            }
+            for p in 0..kc {
+                b_micro[p * NR..p * NR + NR]
+                    .copy_from_slice(&b_pack[p * nc + jr..p * nc + jr + NR]);
+            }
+
             unsafe {
-                // Build pointers to the packed micropanels.
-                // A micropanel: kc columns × 16 rows, each column at a_pack[p*mc + ir]
-                // We need it as kc × 64 bytes (kc strips of 16 f32).
-                // Since A is packed column-major with mc stride, and we want
-                // 16 contiguous f32 starting at offset ir within each column,
-                // we need a contiguous repacked micro-strip.
-                let mut a_micro = vec![0f32; kc * MR];
-                for p in 0..kc {
-                    for i in 0..MR {
-                        a_micro[p * MR + i] = a_pack[p * mc + ir + i];
-                    }
-                }
-
-                let mut b_micro = vec![0f32; kc * NR];
-                for p in 0..kc {
-                    for j in 0..NR {
-                        b_micro[p * NR + j] = b_pack[p * nc + jr + j];
-                    }
-                }
-
-                // Run AMX microkernel.
                 matrix::tile::microkernel_16x16(
                     a_micro.as_ptr() as *const u8,
                     b_micro.as_ptr() as *const u8,
                     kc,
                 );
 
-                // Accumulate tile result into C.
                 let c_ptr = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
                 matrix::tile::accumulate_tile_16x16(c_ptr, n);
             }
@@ -207,7 +220,7 @@ fn gebp_kernel(
             jr += NR;
         }
 
-        // Handle remaining columns (< NR) with NEON scalar.
+        // Handle remaining columns (< NR) with scalar.
         if jr < nc {
             for i in ir..ir + MR {
                 for j in jr..nc {
@@ -390,7 +403,7 @@ mod tests {
 
     #[test]
     fn sgemm_small_neon_path() {
-        // 4×4 should take NEON path (< MR).
+        // 4×4 should take scalar path (< MR).
         const N: usize = 4;
         let a: Vec<f32> = (1..=16).map(|x| x as f32).collect();
         let b = vec![
