@@ -19,10 +19,6 @@ use crate::matrix;
 const MR: usize = 16;
 const NR: usize = 16;
 pub(super) const MC: usize = 64;
-pub(super) const KC_LARGE: usize = 512;
-pub(super) const NC_LARGE: usize = 512;
-pub(super) const KC_SMALL: usize = 256;
-pub(super) const NC_SMALL: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Aligned allocation
@@ -155,10 +151,15 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
         }
     };
 
-    // Adaptive blocking: large KC for big K, small for small K.
-    let kc_max = if k > 256 { KC_LARGE } else { KC_SMALL };
-    let nc_max = if n > 256 { NC_LARGE } else { NC_SMALL };
-    let mut a_pack = AlignedBuf::new(MC * kc_max);
+    // Adaptive blocking: MC × KC × 4 must fit L1 (128KB).
+    // Large KC = fewer K-panels = less packing overhead.
+    let (mc_max, kc_max) = if k > 512 && m > 64 {
+        (32, 1024) // MC=32 × KC=1024 × 4 = 128KB
+    } else {
+        (MC, 512) // MC=64 × KC=512 × 4 = 128KB
+    };
+    let nc_max = if n > 256 { 512 } else { 256 };
+    let mut a_pack = AlignedBuf::new(mc_max * kc_max);
     let mut b_pack = AlignedBuf::new(kc_max * nc_max);
 
     let mut pc = 0;
@@ -172,7 +173,7 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
 
             let mut ic = 0;
             while ic < m {
-                let mc = (m - ic).min(MC);
+                let mc = (m - ic).min(mc_max);
                 pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
                 gebp_kernel(
                     &ctx,
