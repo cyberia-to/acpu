@@ -6,6 +6,10 @@
 //! `sgemm` uses AMX 16×16 microkernel with GEBP cache blocking when
 //! available, falling back to scalar.
 
+mod other;
+
+pub use other::{bgemm, hgemm, qgemm};
+
 use crate::matrix;
 
 // ---------------------------------------------------------------------------
@@ -59,6 +63,9 @@ impl AlignedBuf {
     }
 }
 
+// AlignedBuf is a single-owner heap buffer. Safe to send across threads.
+unsafe impl Send for AlignedBuf {}
+
 impl Drop for AlignedBuf {
     fn drop(&mut self) {
         if !self.ptr.is_null() && self.len > 0 {
@@ -75,6 +82,7 @@ impl Drop for AlignedBuf {
 /// Single-precision matrix multiply: C += A × B.
 ///
 /// Row-major: A[m×k], B[k×n], C[m×n].
+/// Parallelizes across M dimension using P-core threads when beneficial.
 ///
 /// # Panics
 ///
@@ -86,12 +94,66 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
 
     #[cfg(target_arch = "aarch64")]
     {
-        sgemm_amx(a, b, c, m, n, k);
+        // Parallelize only when problem is large enough to amortize thread overhead.
+        // 2*m*n*k = FLOPS. Threshold ~16M FLOPS (roughly 200×200×200).
+        let flops = 2 * m * n * k;
+        let p_cores = crate::probe::detect().p_cores as usize;
+        let n_threads = p_cores.max(1).min(m / MR.max(1));
+        if n_threads > 1 && flops > 16_000_000 {
+            sgemm_parallel(a, b, c, m, n, k, n_threads);
+        } else {
+            sgemm_amx(a, b, c, m, n, k);
+        }
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
         sgemm_scalar(a, b, c, m, n, k);
     }
+}
+
+/// Parallel sgemm: partition M across threads, each with own AmxCtx.
+#[cfg(target_arch = "aarch64")]
+fn sgemm_parallel(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    n_threads: usize,
+) {
+    // Align rows-per-thread to MR for clean tile boundaries.
+    let base_rows = m / n_threads;
+    let base_rows_aligned = (base_rows / MR) * MR;
+    let rows_per_thread = if base_rows_aligned == 0 {
+        MR
+    } else {
+        base_rows_aligned
+    };
+
+    std::thread::scope(|s| {
+        let mut c_rest: &mut [f32] = c;
+        let mut m_start = 0;
+
+        while m_start < m {
+            let m_this = if m - m_start <= rows_per_thread + MR {
+                m - m_start // last thread takes all remaining (avoid tiny tail)
+            } else {
+                rows_per_thread
+            };
+
+            let (c_chunk, rest) = c_rest.split_at_mut(m_this * n);
+            c_rest = rest;
+            let a_slice = &a[m_start * k..(m_start + m_this) * k];
+
+            s.spawn(move || {
+                let _ = crate::sync::affinity::pin_p_core();
+                sgemm_amx(a_slice, b, c_chunk, m_this, n, k);
+            });
+
+            m_start += m_this;
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -284,88 +346,6 @@ fn sgemm_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usiz
 }
 
 // ---------------------------------------------------------------------------
-// hgemm — fp16 inputs, f32 accumulator
-// ---------------------------------------------------------------------------
-
-/// Half-precision matrix multiply: C += A × B (fp16 in, fp32 accum).
-///
-/// # Panics
-///
-/// Panics if slice lengths do not match dimensions.
-pub fn hgemm(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
-    assert_eq!(a.len(), m * k);
-    assert_eq!(b.len(), k * n);
-    assert_eq!(c.len(), m * n);
-
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0f32;
-            for p in 0..k {
-                let av = crate::numeric::fp16::fp16_to_f32(a[i * k + p]);
-                let bv = crate::numeric::fp16::fp16_to_f32(b[p * n + j]);
-                acc += av * bv;
-            }
-            c[i * n + j] += acc;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// bgemm — bf16 inputs, f32 accumulator
-// ---------------------------------------------------------------------------
-
-/// BFloat16 matrix multiply: C += A × B (bf16 in, fp32 accum).
-pub fn bgemm(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
-    assert_eq!(a.len(), m * k);
-    assert_eq!(b.len(), k * n);
-    assert_eq!(c.len(), m * n);
-
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0f32;
-            for p in 0..k {
-                let av = crate::numeric::bf16::bf16_to_f32(a[i * k + p]);
-                let bv = crate::numeric::bf16::bf16_to_f32(b[p * n + j]);
-                acc += av * bv;
-            }
-            c[i * n + j] += acc;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// qgemm — int8 inputs, f32 accumulator
-// ---------------------------------------------------------------------------
-
-/// Int8 quantised matrix multiply: C += scale × (A - zero) × (B - zero).
-#[allow(clippy::too_many_arguments)]
-pub fn qgemm(
-    a: &[i8],
-    b: &[i8],
-    c: &mut [f32],
-    m: usize,
-    n: usize,
-    k: usize,
-    scale: f32,
-    zero: i8,
-) {
-    assert_eq!(a.len(), m * k);
-    assert_eq!(b.len(), k * n);
-    assert_eq!(c.len(), m * n);
-
-    let z = zero as i32;
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0i32;
-            for p in 0..k {
-                acc += (a[i * k + p] as i32 - z) * (b[p * n + j] as i32 - z);
-            }
-            c[i * n + j] += acc as f32 * scale;
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -437,17 +417,5 @@ mod tests {
                 c_ref[i]
             );
         }
-    }
-
-    #[test]
-    fn qgemm_basic() {
-        let a: Vec<i8> = vec![1, 2, 3, 4];
-        let b: Vec<i8> = vec![1, 0, 0, 1];
-        let mut c = vec![0.0f32; 4];
-        qgemm(&a, &b, &mut c, 2, 2, 2, 1.0, 0);
-        assert!((c[0] - 1.0).abs() < 1e-5);
-        assert!((c[1] - 2.0).abs() < 1e-5);
-        assert!((c[2] - 3.0).abs() < 1e-5);
-        assert!((c[3] - 4.0).abs() < 1e-5);
     }
 }
