@@ -1,52 +1,31 @@
-//! AMX 16×16 f32 tile operations for GEMM microkernel.
+//! AMX f32 tile operations for GEMM microkernels.
 //!
-//! Computes C[16×16] += A[16×K] × B[K×16] using AMX fma32 outer
-//! products. A is stored column-major (each column loaded into Y),
-//! B is stored row-major (each row loaded into X).
-//!
-//! The microkernel batches 8 rank-1 updates at a time because
-//! AMX has 8 X and 8 Y registers.
+//! Two microkernels:
+//! - `microkernel_16x16`: single tile, Z tile 0
+//! - `microkernel_16x32`: double-wide, Z tiles 0+1, 2× compute per A load
 
 use super::asm::{amx_op, OP_FMA32, OP_LDX, OP_LDY, OP_STZ};
 use super::fma::{fma_acc, fma_first};
 use super::regs::{XRow, YRow};
 
-/// AMX 16×16 f32 microkernel.
-///
-/// Computes `c[16×16] = a_panel × b_panel` (first call) or
-/// `c[16×16] += a_panel × b_panel` (subsequent).
-///
-/// # Layout
-///
-/// - `b_panel`: K rows of 16 f32 each = K×64 bytes, row-major.
-///   Each row is loaded into an X register.
-/// - `a_panel`: K columns of 16 f32 each = K×64 bytes, column-major
-///   (transposed). Each column is loaded into a Y register.
-/// - Result accumulates in Z tile 0 (Z rows 0,4,8,...,60).
+// ---------------------------------------------------------------------------
+// 16×16 microkernel (single tile)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×16 f32 microkernel. Z tile 0.
 ///
 /// # Safety
-///
-/// - AMX must be active (caller holds AmxCtx).
-/// - `a_panel` must have at least `k * 64` readable bytes, 64-byte aligned.
-/// - `b_panel` must have at least `k * 64` readable bytes, 64-byte aligned.
-/// - `k > 0`.
+/// AMX must be active. Panels must be 64-byte aligned with `k*64` readable bytes.
 #[inline]
 pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize) {
     let mut first = true;
-
     let mut p = 0usize;
-    // Process 8 rank-1 updates at a time (fills all 8 X/Y registers).
-    while p + 8 <= k {
-        // Interleave loads and FMAs: load pair, then FMA previous pair.
-        // First batch: just load all 8.
-        for i in 0u8..8 {
-            let b_ptr = b_panel.add((p + i as usize) * 64);
-            let a_ptr = a_panel.add((p + i as usize) * 64);
-            amx_op::<OP_LDX>((b_ptr as u64) | ((i as u64) << 56));
-            amx_op::<OP_LDY>((a_ptr as u64) | ((i as u64) << 56));
-        }
 
-        // Issue 8 fma32 outer products.
+    while p + 8 <= k {
+        for i in 0u8..8 {
+            amx_op::<OP_LDX>((b_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+            amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+        }
         if first {
             amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
             first = false;
@@ -56,41 +35,122 @@ pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize
         for i in 1u8..8 {
             amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
         }
-
         p += 8;
     }
 
-    // Handle remaining 1..7 rank-1 updates.
-    if p < k {
-        let rem = k - p;
-        for i in 0..(rem as u8) {
-            let b_ptr = b_panel.add((p + i as usize) * 64);
-            let a_ptr = a_panel.add((p + i as usize) * 64);
-            amx_op::<OP_LDX>((b_ptr as u64) | ((i as u64) << 56));
-            amx_op::<OP_LDY>((a_ptr as u64) | ((i as u64) << 56));
-        }
-
+    while p < k {
+        amx_op::<OP_LDX>(b_panel.add(p * 64) as u64);
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
         if first {
             amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
             first = false;
-            for i in 1..(rem as u8) {
-                amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
-            }
         } else {
-            for i in 0..(rem as u8) {
-                amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
-            }
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
         }
+        p += 1;
     }
-    let _ = first;
 }
+
+// ---------------------------------------------------------------------------
+// 16×32 microkernel (double-wide: 2 tiles side by side in N)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×32 f32 microkernel. Uses Z tiles 0 and 1.
+///
+/// Computes C[16×32] += A[16×K] × B[K×32] using 2 tiles:
+/// - Tile 0: C[0..16, 0..16]   = A × B_left
+/// - Tile 1: C[0..16, 16..32]  = A × B_right
+///
+/// # Safety
+/// AMX must be active. All panels must be 64-byte aligned with `k*64` readable bytes.
+#[inline]
+pub unsafe fn microkernel_16x32(
+    a_panel: *const u8,
+    b_left: *const u8,
+    b_right: *const u8,
+    k: usize,
+) {
+    let mut first_t0 = true;
+    let mut first_t1 = true;
+    let mut p = 0usize;
+
+    // Batch of 4: 4Y + 4X(left) + 4X(right) = 4Y + 8X = all registers used.
+    while p + 4 <= k {
+        for i in 0u8..4 {
+            amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+        }
+        for i in 0u8..4 {
+            amx_op::<OP_LDX>((b_left.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+        }
+
+        // FMA tile 0
+        if first_t0 {
+            amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+            first_t0 = false;
+        } else {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+        }
+        for i in 1u8..4 {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
+        }
+
+        // Load B_right into X[4..7]
+        for i in 0u8..4 {
+            amx_op::<OP_LDX>(
+                (b_right.add((p + i as usize) * 64) as u64) | (((4 + i) as u64) << 56),
+            );
+        }
+
+        // FMA tile 1 (reuses Y[0..3] from above)
+        if first_t1 {
+            amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(4), YRow::new_unchecked(0), 1));
+            first_t1 = false;
+        } else {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(4), YRow::new_unchecked(0), 1));
+        }
+        for i in 1u8..4 {
+            amx_op::<OP_FMA32>(fma_acc(
+                XRow::new_unchecked(4 + i),
+                YRow::new_unchecked(i),
+                1,
+            ));
+        }
+
+        p += 4;
+    }
+
+    // Remainder: one at a time.
+    while p < k {
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b_left.add(p * 64) as u64);
+
+        if first_t0 {
+            amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+            first_t0 = false;
+        } else {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+        }
+
+        amx_op::<OP_LDX>((b_right.add(p * 64) as u64) | (1u64 << 56));
+        if first_t1 {
+            amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
+            first_t1 = false;
+        } else {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
+        }
+
+        p += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tile store / accumulate
+// ---------------------------------------------------------------------------
 
 /// Store the 16×16 result from Z tile 0 into a row-major f32 buffer.
 ///
 /// # Safety
-///
-/// - AMX must be active.
-/// - `dst` must point to at least 16×64 = 1024 writable bytes, 64-byte aligned.
+/// AMX must be active. `dst` must have 1024 writable bytes, 64-byte aligned.
 #[inline]
 pub unsafe fn store_tile_16x16(dst: *mut u8) {
     for j in 0u8..16 {
@@ -99,24 +159,20 @@ pub unsafe fn store_tile_16x16(dst: *mut u8) {
     }
 }
 
-/// Add the 16×16 result from Z tile 0 into an existing row-major f32 buffer.
-///
-/// Uses NEON vector adds (4-wide) instead of scalar for ~4× faster accumulate.
+/// Add Z tile contents into existing C buffer. NEON-vectorized.
 ///
 /// # Safety
-///
-/// - AMX must be active.
-/// - `c` must point to valid f32 data with stride `ldc`.
+/// AMX must be active. `c` must point to valid f32 data with stride `ldc`.
 #[inline]
-pub unsafe fn accumulate_tile_16x16(c: *mut f32, ldc: usize) {
+pub unsafe fn accumulate_tile(c: *mut f32, ldc: usize, tile: u8) {
     #[repr(align(64))]
-    struct Aligned64([f32; 16]);
+    struct A64([f32; 16]);
 
-    let mut zbuf = Aligned64([0f32; 16]);
+    let mut zbuf = A64([0f32; 16]);
     let z_ptr = zbuf.0.as_mut_ptr() as *mut u8;
 
     for j in 0u8..16 {
-        let z_row = j * 4;
+        let z_row = j * 4 + tile;
         amx_op::<OP_STZ>((z_ptr as u64) | ((z_row as u64) << 56));
 
         let c_row = c.add(j as usize * ldc);
@@ -137,4 +193,13 @@ pub unsafe fn accumulate_tile_16x16(c: *mut f32, ldc: usize) {
             }
         }
     }
+}
+
+/// Backward-compatible wrapper for tile 0.
+///
+/// # Safety
+/// AMX must be active. `c` must point to valid f32 data with stride `ldc`.
+#[inline]
+pub unsafe fn accumulate_tile_16x16(c: *mut f32, ldc: usize) {
+    accumulate_tile(c, ldc, 0);
 }

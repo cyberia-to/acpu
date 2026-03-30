@@ -290,28 +290,51 @@ fn gebp_kernel(
     for ir_strip in 0..n_mr {
         let ir = ir_strip * MR;
         let mr_actual = MR.min(mc - ir);
+        let a_ptr = unsafe { a_pack.as_ptr().add(ir_strip * kc * MR) as *const u8 };
 
-        for jr_strip in 0..n_nr {
+        let mut jr_strip = 0;
+
+        // Process pairs of B strips with 16×32 double-wide microkernel.
+        while jr_strip + 2 <= n_nr && mr_actual == MR {
+            let jr = jr_strip * NR;
+            let nr0 = NR.min(nc - jr);
+            let nr1 = NR.min(nc - jr - NR);
+
+            if nr0 == NR && nr1 == NR {
+                let b_left = unsafe { b_pack.as_ptr().add(jr_strip * kc * NR) as *const u8 };
+                let b_right = unsafe { b_pack.as_ptr().add((jr_strip + 1) * kc * NR) as *const u8 };
+
+                unsafe {
+                    matrix::tile::microkernel_16x32(a_ptr, b_left, b_right, kc);
+                    let c0 = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
+                    matrix::tile::accumulate_tile(c0, n, 0);
+                    let c1 = c.as_mut_ptr().add((ic + ir) * n + jc + jr + NR);
+                    matrix::tile::accumulate_tile(c1, n, 1);
+                }
+                jr_strip += 2;
+            } else {
+                break;
+            }
+        }
+
+        // Remaining single tiles.
+        while jr_strip < n_nr {
             let jr = jr_strip * NR;
             let nr_actual = NR.min(nc - jr);
-
-            // Direct pointers into packed buffers (no copy needed).
-            let a_ptr = unsafe { a_pack.as_ptr().add(ir_strip * kc * MR) as *const u8 };
             let b_ptr = unsafe { b_pack.as_ptr().add(jr_strip * kc * NR) as *const u8 };
 
             if mr_actual == MR && nr_actual == NR {
-                // Full 16×16 tile: AMX microkernel.
                 unsafe {
                     matrix::tile::microkernel_16x16(a_ptr, b_ptr, kc);
                     let c_ptr = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
                     matrix::tile::accumulate_tile_16x16(c_ptr, n);
                 }
             } else {
-                // Edge tile: scalar fallback.
                 edge_kernel(
-                    a_pack, b_pack, c, n, ic, jc, ir_strip, jr_strip, mr_actual, nr_actual, kc, mc,
+                    a_pack, b_pack, c, n, ic, jc, ir_strip, jr_strip, mr_actual, nr_actual, kc,
                 );
             }
+            jr_strip += 1;
         }
     }
 }
@@ -329,7 +352,6 @@ fn edge_kernel(
     mr: usize,
     nr: usize,
     kc: usize,
-    _mc: usize,
 ) {
     let ir = ir_strip * MR;
     let jr = jr_strip * NR;
