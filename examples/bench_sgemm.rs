@@ -27,7 +27,7 @@ const CBLAS_NO_TRANS: i32 = 111;
 
 use std::time::{Duration, Instant};
 
-const SIZES: &[usize] = &[64, 128, 256, 512, 1024];
+const SIZES: &[usize] = &[64, 128, 256, 512, 1024, 2048, 4096];
 const ITERS: usize = 100;
 
 /// Run `f` for `ITERS` iterations and return the median duration.
