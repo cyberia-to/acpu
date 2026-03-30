@@ -481,19 +481,43 @@ fn edge_kernel(
 // Fallbacks
 // ---------------------------------------------------------------------------
 
+/// NEON-tiled sgemm for small matrices. No packing, no AMX, zero overhead.
+/// Uses 4-wide NEON fmla directly on input data.
 #[cfg(target_arch = "aarch64")]
-fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    for i in 0..m {
-        let a_row = &a[i * k..(i + 1) * k];
-        let c_row = &mut c[i * n..(i + 1) * n];
-        for j in 0..n {
-            let mut acc = 0.0f32;
-            for p in 0..k {
-                acc += a_row[p] * b[p * n + j];
+fn sgemm_neon_tiled(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    use core::arch::aarch64::*;
+    unsafe {
+        let mut i = 0;
+        while i < m {
+            let mut j = 0;
+            while j + 4 <= n {
+                // Accumulate 1×4 block of C.
+                let mut acc = vld1q_f32(c.as_ptr().add(i * n + j));
+                for p in 0..k {
+                    let a_val = vdupq_n_f32(*a.get_unchecked(i * k + p));
+                    let b_vec = vld1q_f32(b.as_ptr().add(p * n + j));
+                    acc = vfmaq_f32(acc, a_val, b_vec);
+                }
+                vst1q_f32(c.as_mut_ptr().add(i * n + j), acc);
+                j += 4;
             }
-            c_row[j] += acc;
+            // Remainder columns.
+            while j < n {
+                let mut acc = *c.get_unchecked(i * n + j);
+                for p in 0..k {
+                    acc += a.get_unchecked(i * k + p) * b.get_unchecked(p * n + j);
+                }
+                *c.get_unchecked_mut(i * n + j) = acc;
+                j += 1;
+            }
+            i += 1;
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    sgemm_neon_tiled(a, b, c, m, n, k);
 }
 
 #[allow(dead_code)]

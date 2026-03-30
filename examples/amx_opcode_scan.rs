@@ -94,7 +94,9 @@ fn main() {
                     if has {
                         print!("  Z[{:2}] = [", row);
                         for i in 0..16 {
-                            if i > 0 { print!(", "); }
+                            if i > 0 {
+                                print!(", ");
+                            }
                             print!("{:.1}", *base.add(i));
                         }
                         println!("]");
