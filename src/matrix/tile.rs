@@ -158,6 +158,93 @@ pub unsafe fn microkernel_16x32(
 }
 
 // ---------------------------------------------------------------------------
+// 16×64 microkernel (quad-wide: all 4 Z tiles in N direction)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×64 f32 microkernel. Uses all 4 Z tiles.
+///
+/// Each Y load (A column) serves 4 FMAs — maximum register reuse.
+/// Batch of 2: 2Y + 8X + 8 FMA = 18 instructions for 4096 FLOPS.
+///
+/// # Safety
+/// AMX must be active. All panels must be 64-byte aligned with `k*64` readable bytes.
+#[inline]
+pub unsafe fn microkernel_16x64(
+    a_panel: *const u8,
+    b0: *const u8,
+    b1: *const u8,
+    b2: *const u8,
+    b3: *const u8,
+    k: usize,
+) {
+    let mut first = [true; 4];
+    let mut p = 0usize;
+
+    // Batch of 2 rank-1 updates: 2Y + 4×2X + 4×2FMA = 18 instructions.
+    while p + 2 <= k {
+        // Prefetch.
+        if p + 4 <= k {
+            crate::sync::prefetch::prefetch_l1(a_panel.add((p + 2) * 64));
+            crate::sync::prefetch::prefetch_l1(b0.add((p + 2) * 64));
+        }
+
+        // Load 2 A columns.
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_LDY>((a_panel.add((p + 1) * 64) as u64) | (1u64 << 56));
+
+        // Load 4 B strips for update 0 into X[0..3].
+        amx_op::<OP_LDX>(b0.add(p * 64) as u64);
+        amx_op::<OP_LDX>((b1.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b2.add(p * 64) as u64) | (2u64 << 56));
+        amx_op::<OP_LDX>((b3.add(p * 64) as u64) | (3u64 << 56));
+
+        // FMA 4 tiles with Y[0].
+        for t in 0u8..4 {
+            if first[t as usize] {
+                amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
+                first[t as usize] = false;
+            } else {
+                amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
+            }
+        }
+
+        // Load 4 B strips for update 1 into X[4..7].
+        amx_op::<OP_LDX>((b0.add((p + 1) * 64) as u64) | (4u64 << 56));
+        amx_op::<OP_LDX>((b1.add((p + 1) * 64) as u64) | (5u64 << 56));
+        amx_op::<OP_LDX>((b2.add((p + 1) * 64) as u64) | (6u64 << 56));
+        amx_op::<OP_LDX>((b3.add((p + 1) * 64) as u64) | (7u64 << 56));
+
+        // FMA 4 tiles with Y[1].
+        for t in 0u8..4 {
+            amx_op::<OP_FMA32>(fma_acc(
+                XRow::new_unchecked(4 + t),
+                YRow::new_unchecked(1),
+                t,
+            ));
+        }
+
+        p += 2;
+    }
+
+    // Remainder: single update.
+    if p < k {
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b0.add(p * 64) as u64);
+        amx_op::<OP_LDX>((b1.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b2.add(p * 64) as u64) | (2u64 << 56));
+        amx_op::<OP_LDX>((b3.add(p * 64) as u64) | (3u64 << 56));
+
+        for t in 0u8..4 {
+            if first[t as usize] {
+                amx_op::<OP_FMA32>(fma_first(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
+            } else {
+                amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(t), YRow::new_unchecked(0), t));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tile store / accumulate
 // ---------------------------------------------------------------------------
 

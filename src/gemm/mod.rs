@@ -389,41 +389,53 @@ pub(super) fn gebp_kernel(
         let a_ptr = unsafe { a_pack.as_ptr().add(ir_strip * kc * MR) as *const u8 };
 
         let mut jr_strip = 0;
+        let b_base = b_pack.as_ptr();
 
-        // Process pairs of B strips with 16×32 double-wide microkernel.
-        while jr_strip + 2 <= n_nr && mr_actual == MR {
+        // Cascade: 16×64 (4 tiles) → 16×32 (2 tiles) → 16×16 (1 tile).
+        // Quad-wide: process 4 B strips at once.
+        while jr_strip + 4 <= n_nr && mr_actual == MR && nc - jr_strip * NR >= 4 * NR {
             let jr = jr_strip * NR;
-            let nr0 = NR.min(nc - jr);
-            let nr1 = NR.min(nc - jr - NR);
-
-            if nr0 == NR && nr1 == NR {
-                let b_left = unsafe { b_pack.as_ptr().add(jr_strip * kc * NR) as *const u8 };
-                let b_right = unsafe { b_pack.as_ptr().add((jr_strip + 1) * kc * NR) as *const u8 };
-
-                unsafe {
-                    matrix::tile::microkernel_16x32(a_ptr, b_left, b_right, kc);
-                    let c0 = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
-                    matrix::tile::accumulate_tile(c0, n, 0);
-                    let c1 = c.as_mut_ptr().add((ic + ir) * n + jc + jr + NR);
-                    matrix::tile::accumulate_tile(c1, n, 1);
+            unsafe {
+                let b0 = b_base.add(jr_strip * kc * NR) as *const u8;
+                let b1 = b_base.add((jr_strip + 1) * kc * NR) as *const u8;
+                let b2 = b_base.add((jr_strip + 2) * kc * NR) as *const u8;
+                let b3 = b_base.add((jr_strip + 3) * kc * NR) as *const u8;
+                matrix::tile::microkernel_16x64(a_ptr, b0, b1, b2, b3, kc);
+                for t in 0u8..4 {
+                    let cp = c
+                        .as_mut_ptr()
+                        .add((ic + ir) * n + jc + jr + t as usize * NR);
+                    matrix::tile::accumulate_tile(cp, n, t);
                 }
-                jr_strip += 2;
-            } else {
-                break;
             }
+            jr_strip += 4;
         }
 
-        // Remaining single tiles.
+        // Double-wide: process 2 B strips.
+        while jr_strip + 2 <= n_nr && mr_actual == MR && nc - jr_strip * NR >= 2 * NR {
+            let jr = jr_strip * NR;
+            unsafe {
+                let bl = b_base.add(jr_strip * kc * NR) as *const u8;
+                let br = b_base.add((jr_strip + 1) * kc * NR) as *const u8;
+                matrix::tile::microkernel_16x32(a_ptr, bl, br, kc);
+                let c0 = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
+                matrix::tile::accumulate_tile(c0, n, 0);
+                let c1 = c.as_mut_ptr().add((ic + ir) * n + jc + jr + NR);
+                matrix::tile::accumulate_tile(c1, n, 1);
+            }
+            jr_strip += 2;
+        }
+
+        // Single tiles (including edge cases).
         while jr_strip < n_nr {
             let jr = jr_strip * NR;
             let nr_actual = NR.min(nc - jr);
-            let b_ptr = unsafe { b_pack.as_ptr().add(jr_strip * kc * NR) as *const u8 };
-
             if mr_actual == MR && nr_actual == NR {
                 unsafe {
-                    matrix::tile::microkernel_16x16(a_ptr, b_ptr, kc);
-                    let c_ptr = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
-                    matrix::tile::accumulate_tile_16x16(c_ptr, n);
+                    let bp = b_base.add(jr_strip * kc * NR) as *const u8;
+                    matrix::tile::microkernel_16x16(a_ptr, bp, kc);
+                    let cp = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
+                    matrix::tile::accumulate_tile_16x16(cp, n);
                 }
             } else {
                 edge_kernel(
