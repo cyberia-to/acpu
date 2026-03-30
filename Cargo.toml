@@ -1,0 +1,23 @@
+[package]
+name = "ramx"
+version = "0.1.0"
+edition = "2021"
+description = "pure Rust driver for Apple Silicon CPU compute — AMX, NEON, numeric extensions, sync, PMU"
+license = "LicenseRef-Cyber"
+repository = "https://github.com/cyberia-to/ramx"
+
+[lib]
+name = "ramx"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ramx_probe"
+path = "src/probe/main.rs"
+
+[[example]]
+name = "matmul"
+path = "examples/matmul.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
