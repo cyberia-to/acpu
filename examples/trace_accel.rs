@@ -1,4 +1,4 @@
-//! Call cblas_sgemm in a loop for profiling/sampling.
+//! Loop cblas_sgemm for profiling. Usage: trace_accel [size] [iters]
 #[link(name = "Accelerate", kind = "framework")]
 extern "C" {
     fn cblas_sgemm(
@@ -20,30 +20,44 @@ extern "C" {
 }
 
 fn main() {
-    let n = 64i32;
-    let a = vec![1.0f32; (n * n) as usize];
-    let b = vec![1.0f32; (n * n) as usize];
-    let mut c = vec![0.0f32; (n * n) as usize];
+    let sz = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(64);
+    let iters: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5_000_000);
 
-    eprintln!("looping cblas_sgemm 64×64 for profiling...");
-    for _ in 0..1_000_000 {
+    let a = vec![1.0f32; (sz * sz) as usize];
+    let b = vec![1.0f32; (sz * sz) as usize];
+    let mut c = vec![0.0f32; (sz * sz) as usize];
+
+    eprintln!(
+        "looping {}×{} for {} iters (pid {})",
+        sz,
+        sz,
+        iters,
+        std::process::id()
+    );
+    for _ in 0..iters {
         c.fill(0.0);
         unsafe {
             cblas_sgemm(
                 101,
                 111,
                 111,
-                n,
-                n,
-                n,
+                sz,
+                sz,
+                sz,
                 1.0,
                 a.as_ptr(),
-                n,
+                sz,
                 b.as_ptr(),
-                n,
+                sz,
                 0.0,
                 c.as_mut_ptr(),
-                n,
+                sz,
             );
         }
         std::hint::black_box(&c);
