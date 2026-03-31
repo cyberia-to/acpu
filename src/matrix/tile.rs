@@ -18,11 +18,26 @@ use super::regs::{XRow, YRow};
 /// AMX must be active. `c` must point to `16 * ldc` readable f32 elements.
 #[inline]
 pub unsafe fn preload_c(c: *const f32, ldc: usize, tile: u8) {
-    for j in 0u8..16 {
-        let z_row = j * 4 + tile;
-        let c_addr = (c as *const u8).add(j as usize * ldc * 4);
-        amx_op::<OP_LDZ>((c_addr as u64) | ((z_row as u64) << 56));
-    }
+    let stride = ldc * 4;
+    let base = c as *const u8;
+    let t = tile as u64;
+    // Fully unrolled: eliminates loop overhead for 16 LDZ ops.
+    amx_op::<OP_LDZ>((base as u64) | (t << 56));
+    amx_op::<OP_LDZ>((base.add(stride) as u64) | ((4 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 2) as u64) | ((8 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 3) as u64) | ((12 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 4) as u64) | ((16 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 5) as u64) | ((20 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 6) as u64) | ((24 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 7) as u64) | ((28 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 8) as u64) | ((32 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 9) as u64) | ((36 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 10) as u64) | ((40 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 11) as u64) | ((44 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 12) as u64) | ((48 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 13) as u64) | ((52 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 14) as u64) | ((56 + t) << 56));
+    amx_op::<OP_LDZ>((base.add(stride * 15) as u64) | ((60 + t) << 56));
 }
 
 /// Store Z tile directly to C[16×16] via STZ. CPU never reads the data.
@@ -31,11 +46,25 @@ pub unsafe fn preload_c(c: *const f32, ldc: usize, tile: u8) {
 /// AMX must be active. `c` must point to `16 * ldc` writable f32 elements.
 #[inline]
 pub unsafe fn store_c(c: *mut f32, ldc: usize, tile: u8) {
-    for j in 0u8..16 {
-        let z_row = j * 4 + tile;
-        let c_addr = (c as *mut u8).add(j as usize * ldc * 4);
-        amx_op::<OP_STZ>((c_addr as u64) | ((z_row as u64) << 56));
-    }
+    let stride = ldc * 4;
+    let base = c as *mut u8;
+    let t = tile as u64;
+    amx_op::<OP_STZ>((base as u64) | (t << 56));
+    amx_op::<OP_STZ>((base.add(stride) as u64) | ((4 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 2) as u64) | ((8 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 3) as u64) | ((12 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 4) as u64) | ((16 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 5) as u64) | ((20 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 6) as u64) | ((24 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 7) as u64) | ((28 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 8) as u64) | ((32 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 9) as u64) | ((36 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 10) as u64) | ((40 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 11) as u64) | ((44 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 12) as u64) | ((48 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 13) as u64) | ((52 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 14) as u64) | ((56 + t) << 56));
+    amx_op::<OP_STZ>((base.add(stride * 15) as u64) | ((60 + t) << 56));
 }
 
 // ---------------------------------------------------------------------------
@@ -675,8 +704,7 @@ pub unsafe fn microkernel_32x32_acc(
     let f01 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(1), 2);
     let f11 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(1), 3);
 
-    // 7 AMX ops per k-step: pair LDY for A (aligned), individual LDX for B (user data).
-    // B may not be 128-byte aligned, so no pair LDX.
+    // 7 AMX ops per k-step: 1 LDY(pair) + 2 LDX + 4 FMA.
     let mut p = 0usize;
     while p < k {
         amx_op::<OP_LDY>((a_pair.add(p * 128) as u64) | PAIR);
