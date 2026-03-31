@@ -126,7 +126,7 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
             let p_cores = crate::probe::detect().p_cores as usize;
             let max_threads = if m >= MR { m / MR } else { 1 };
             let n_threads = p_cores.max(1).min(max_threads);
-            if n_threads > 1 && flops > 16_000_000 {
+            if n_threads > 1 && flops > 1_000_000_000 {
                 sgemm_parallel(a, b, c, m, n, k, n_threads);
             } else {
                 sgemm_amx_single(a, b, c, m, n, k);
@@ -139,7 +139,7 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     }
 }
 
-/// Parallel sgemm: single scope, each thread runs full GEBP on its M-strip.
+/// Parallel sgemm: pre-pack all B, spawn threads once, shared B access.
 #[cfg(target_arch = "aarch64")]
 fn sgemm_parallel(
     a: &[f32],
@@ -150,9 +150,36 @@ fn sgemm_parallel(
     k: usize,
     n_threads: usize,
 ) {
-    let base = (m / n_threads / MR) * MR;
-    let rows_per_thread = if base == 0 { MR } else { base };
+    let kc_max = k.min(if k > 256 { 512 } else { 256 });
+    let mc_max = if m > 128 { 256 } else { MC };
+    let nc_max = n.min(if n > 256 { 512 } else { 256 });
 
+    let b_block = kc_max * nc_max.div_ceil(NR) * NR;
+    let k_blocks = k.div_ceil(kc_max);
+    let n_blocks = n.div_ceil(nc_max);
+
+    // Pre-pack ALL B blocks on main thread. Shared across workers.
+    let mut b_all = AlignedBuf::new(k_blocks * n_blocks * b_block);
+    {
+        let mut pc = 0;
+        for pi in 0..k_blocks {
+            let kc = (k - pc).min(kc_max);
+            let mut jc = 0;
+            for ji in 0..n_blocks {
+                let nc = (n - jc).min(nc_max);
+                let off = (pi * n_blocks + ji) * b_block;
+                pack_b_nr(b, n, pc, jc, kc, nc, &mut b_all.as_mut_slice()[off..]);
+                jc += nc;
+            }
+            pc += kc;
+        }
+    }
+    let b_packed = b_all.as_slice();
+
+    let base_rows = (m / n_threads / MR) * MR;
+    let rows_per_thread = if base_rows == 0 { MR } else { base_rows };
+
+    // Spawn threads ONCE. Each thread handles its M-strip across all (pc, jc).
     std::thread::scope(|s| {
         let mut c_rest: &mut [f32] = c;
         let mut m_start = 0;
@@ -170,7 +197,48 @@ fn sgemm_parallel(
 
             s.spawn(move || {
                 let _ = crate::sync::affinity::pin_p_core();
-                sgemm_amx_single(a_slice, b, c_chunk, m_this, n, k);
+                let ctx = match matrix::AmxCtx::new() {
+                    Ok(ctx) => ctx,
+                    Err(_) => return,
+                };
+
+                let mc = m_this.min(mc_max);
+                let a_need = mc.div_ceil(MR) * MR * kc_max;
+                let mut a_pack = AlignedBuf::new(a_need);
+
+                let mut pc = 0;
+                for pi in 0..k_blocks {
+                    let kc = (k - pc).min(kc_max);
+
+                    let mut ic = 0;
+                    while ic < m_this {
+                        let mc_cur = (m_this - ic).min(mc);
+                        pack_a_mr(a_slice, k, ic, pc, mc_cur, kc, a_pack.as_mut_slice());
+
+                        let mut jc = 0;
+                        for ji in 0..n_blocks {
+                            let nc = (n - jc).min(nc_max);
+                            let off = (pi * n_blocks + ji) * b_block;
+                            gebp_kernel(
+                                &ctx,
+                                a_pack.as_slice(),
+                                &b_packed[off..],
+                                c_chunk,
+                                n,
+                                ic,
+                                jc,
+                                mc_cur,
+                                nc,
+                                kc,
+                            );
+                            jc += nc;
+                        }
+                        ic += mc_cur;
+                    }
+                    pc += kc;
+                }
+
+                drop(ctx);
             });
 
             m_start += m_this;
