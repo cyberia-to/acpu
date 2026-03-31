@@ -403,6 +403,62 @@ pub unsafe fn microkernel_16x64(
 }
 
 // ---------------------------------------------------------------------------
+// 16×64 microkernel — strided B, zeros Z (no preload needed)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×64 microkernel with strided B. Zeros Z via fma_first, no preload_c needed.
+/// Use with accumulate_tile to add result to C via NEON (avoids 64 LDZ per call).
+///
+/// # Safety
+/// AMX must be active. A: 64-byte stride. B panels: `bs`-byte stride.
+#[inline]
+pub unsafe fn microkernel_16x64_strided(
+    a_panel: *const u8,
+    b0: *const u8,
+    b1: *const u8,
+    b2: *const u8,
+    b3: *const u8,
+    k: usize,
+    bs: usize,
+) {
+    let f0_first = fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+    let f1_first = fma_first(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+    let f2_first = fma_first(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
+    let f3_first = fma_first(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
+    let f0 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+    let f1 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+    let f2 = fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
+    let f3 = fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
+
+    // First k-step: fma_first zeros Z tiles.
+    if k > 0 {
+        amx_op::<OP_LDY>(a_panel as u64);
+        amx_op::<OP_LDX>(b0 as u64);
+        amx_op::<OP_LDX>((b1 as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b2 as u64) | (2u64 << 56));
+        amx_op::<OP_LDX>((b3 as u64) | (3u64 << 56));
+        amx_op::<OP_FMA32>(f0_first);
+        amx_op::<OP_FMA32>(f1_first);
+        amx_op::<OP_FMA32>(f2_first);
+        amx_op::<OP_FMA32>(f3_first);
+    }
+
+    let mut p = 1usize;
+    while p < k {
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b0.add(p * bs) as u64);
+        amx_op::<OP_LDX>((b1.add(p * bs) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b2.add(p * bs) as u64) | (2u64 << 56));
+        amx_op::<OP_LDX>((b3.add(p * bs) as u64) | (3u64 << 56));
+        amx_op::<OP_FMA32>(f0);
+        amx_op::<OP_FMA32>(f1);
+        amx_op::<OP_FMA32>(f2);
+        amx_op::<OP_FMA32>(f3);
+        p += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 16×64 microkernel — accumulate-only (Z preloaded with C)
 // ---------------------------------------------------------------------------
 
@@ -422,51 +478,42 @@ pub unsafe fn microkernel_16x64_acc(
     k: usize,
     bs: usize,
 ) {
+    let f0 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+    let f1 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+    let f2 = fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
+    let f3 = fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
+
     let mut p = 0usize;
-
-    while p + 2 <= k {
-        if p + 4 <= k {
-            crate::sync::prefetch::prefetch_l1(a_panel.add((p + 2) * 64));
-            crate::sync::prefetch::prefetch_l1(b0.add((p + 2) * bs));
-        }
-
-        let a0 = a_panel.add(p * 64) as u64;
-        let a1 = (a_panel.add((p + 1) * 64) as u64) | (1u64 << 56);
+    while p < k {
+        let ay = a_panel.add(p * 64) as u64;
         let bx0 = b0.add(p * bs) as u64;
         let bx1 = (b1.add(p * bs) as u64) | (1u64 << 56);
         let bx2 = (b2.add(p * bs) as u64) | (2u64 << 56);
         let bx3 = (b3.add(p * bs) as u64) | (3u64 << 56);
-        let bx4 = (b0.add((p + 1) * bs) as u64) | (4u64 << 56);
-        let bx5 = (b1.add((p + 1) * bs) as u64) | (5u64 << 56);
-        let bx6 = (b2.add((p + 1) * bs) as u64) | (6u64 << 56);
-        let bx7 = (b3.add((p + 1) * bs) as u64) | (7u64 << 56);
 
-        let f0 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
-        let f1 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
-        let f2 = fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
-        let f3 = fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
-        let g0 = fma_acc(XRow::new_unchecked(4), YRow::new_unchecked(1), 0);
-        let g1 = fma_acc(XRow::new_unchecked(5), YRow::new_unchecked(1), 1);
-        let g2 = fma_acc(XRow::new_unchecked(6), YRow::new_unchecked(1), 2);
-        let g3 = fma_acc(XRow::new_unchecked(7), YRow::new_unchecked(1), 3);
-
-        fused_batch_16x64(
-            a0, a1, bx0, bx1, bx2, bx3, bx4, bx5, bx6, bx7, f0, f1, f2, f3, g0, g1, g2, g3,
+        // 9 AMX ops in ONE asm block: no LLVM barriers between them.
+        core::arch::asm!(
+            ".word (0x00201000 + (1 << 5) + 0{ay} - ((0{ay} >> 4) * 6))",
+            ".word (0x00201000 + (0 << 5) + 0{bx0} - ((0{bx0} >> 4) * 6))",
+            ".word (0x00201000 + (0 << 5) + 0{bx1} - ((0{bx1} >> 4) * 6))",
+            ".word (0x00201000 + (0 << 5) + 0{bx2} - ((0{bx2} >> 4) * 6))",
+            ".word (0x00201000 + (0 << 5) + 0{bx3} - ((0{bx3} >> 4) * 6))",
+            ".word (0x00201000 + (12 << 5) + 0{f0} - ((0{f0} >> 4) * 6))",
+            ".word (0x00201000 + (12 << 5) + 0{f1} - ((0{f1} >> 4) * 6))",
+            ".word (0x00201000 + (12 << 5) + 0{f2} - ((0{f2} >> 4) * 6))",
+            ".word (0x00201000 + (12 << 5) + 0{f3} - ((0{f3} >> 4) * 6))",
+            ay = in(reg) ay,
+            bx0 = in(reg) bx0,
+            bx1 = in(reg) bx1,
+            bx2 = in(reg) bx2,
+            bx3 = in(reg) bx3,
+            f0 = in(reg) f0,
+            f1 = in(reg) f1,
+            f2 = in(reg) f2,
+            f3 = in(reg) f3,
+            options(nostack),
         );
-        p += 2;
-    }
-
-    if p < k {
-        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
-        amx_op::<OP_LDX>(b0.add(p * bs) as u64);
-        amx_op::<OP_LDX>((b1.add(p * bs) as u64) | (1u64 << 56));
-        amx_op::<OP_LDX>((b2.add(p * bs) as u64) | (2u64 << 56));
-        amx_op::<OP_LDX>((b3.add(p * bs) as u64) | (3u64 << 56));
-
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3));
+        p += 1;
     }
 }
 
