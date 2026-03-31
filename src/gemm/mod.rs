@@ -119,6 +119,11 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     #[cfg(target_arch = "aarch64")]
     {
         let flops = 2 * m * n * k;
+        // Tiny matrices (no full tile): NEON, skip AMX entirely.
+        if m < MR || n < NR {
+            sgemm_neon(a, b, c, m, n, k);
+            return;
+        }
         // Small matrices: direct AMX, no B packing (stride LDX).
         // B fits in L1 when n*k*4 ≤ 128KB.
         if n * k <= 32768 {
@@ -609,6 +614,35 @@ fn edge_kernel(
 // ---------------------------------------------------------------------------
 // Fallbacks
 // ---------------------------------------------------------------------------
+
+/// NEON sgemm for tiny matrices (m < MR or n < NR). No AMX.
+#[cfg(target_arch = "aarch64")]
+fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+    use core::arch::aarch64::*;
+    unsafe {
+        for i in 0..m {
+            let mut j = 0;
+            while j + 4 <= n {
+                let mut acc = vld1q_f32(c.as_ptr().add(i * n + j));
+                for p in 0..k {
+                    let a_val = vdupq_n_f32(*a.get_unchecked(i * k + p));
+                    let b_vec = vld1q_f32(b.as_ptr().add(p * n + j));
+                    acc = vfmaq_f32(acc, a_val, b_vec);
+                }
+                vst1q_f32(c.as_mut_ptr().add(i * n + j), acc);
+                j += 4;
+            }
+            while j < n {
+                let mut acc = *c.get_unchecked(i * n + j);
+                for p in 0..k {
+                    acc += a.get_unchecked(i * k + p) * b.get_unchecked(p * n + j);
+                }
+                *c.get_unchecked_mut(i * n + j) = acc;
+                j += 1;
+            }
+        }
+    }
+}
 
 fn sgemm_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     for i in 0..m {
