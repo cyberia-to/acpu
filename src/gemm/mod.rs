@@ -136,7 +136,7 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     {
         let flops = 2 * m * n * k;
         // NEON 4×16 microkernel beats AMX for sizes < 32 (packing overhead
-        // dominates). AMX wins at 32+ where full tiles amortize setup cost.
+        // dominates). AMX pair32 wins at 32+ with full tile utilization.
         if m < 2 * MR || n < 2 * NR {
             sgemm_neon(a, b, c, m, n, k);
             return;
