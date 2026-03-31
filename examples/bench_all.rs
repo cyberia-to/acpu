@@ -6,17 +6,24 @@ fn median(t: &mut [u64]) -> u64 {
     t[t.len() / 2]
 }
 
-fn bench<F: FnMut()>(label: &str, iters: usize, elem: usize, mut f: F) {
-    for _ in 0..10.min(iters) {
-        f();
-    }
-    let mut times = vec![0u64; iters];
-    for i in 0..iters {
+fn bench<F: FnMut()>(label: &str, max_iters: usize, elem: usize, mut f: F) {
+    let deadline = Instant::now() + std::time::Duration::from_secs(3);
+    f(); // single warmup
+    let mut times = Vec::with_capacity(max_iters.min(200));
+    for _ in 0..max_iters.min(200) {
+        if Instant::now() > deadline {
+            break;
+        }
         let t = Instant::now();
         f();
-        times[i] = t.elapsed().as_nanos() as u64;
+        times.push(t.elapsed().as_nanos() as u64);
     }
-    let ns = median(&mut times);
+    if times.is_empty() {
+        eprintln!("  {:<40} TIMEOUT", label);
+        return;
+    }
+    times.sort();
+    let ns = times[times.len() / 2];
     let tp = if ns > 0 {
         elem as f64 / ns as f64
     } else {
@@ -49,6 +56,12 @@ extern "C" {
 }
 
 fn main() {
+    // Hard 30-second wall clock timeout for the entire benchmark.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        eprintln!("\n!!! 30s TIMEOUT — exiting !!!");
+        std::process::exit(0);
+    });
     let n = 4096usize;
     let src: Vec<f32> = (0..n).map(|i| (i % 100) as f32 * 0.01 - 0.5).collect();
     let iters = 500;
@@ -169,11 +182,11 @@ fn main() {
     eprintln!("\n--- GEMM vs Accelerate ---");
     let accel = std::thread::spawn(|| {
         let mut r = Vec::new();
-        for &sz in &[64, 256, 1024, 4096] {
+        for &sz in &[64, 256, 1024] {
             let a = vec![1f32; sz * sz];
             let b = vec![1f32; sz * sz];
             let mut c = vec![0f32; sz * sz];
-            let it = if sz >= 1024 { 5 } else { 20 };
+            let it = if sz >= 1024 { 3 } else { 10 };
             unsafe {
                 cblas_sgemm(
                     101,
@@ -223,11 +236,11 @@ fn main() {
     .join()
     .unwrap();
 
-    for &sz in &[64, 256, 1024, 4096] {
+    for &sz in &[64, 256, 1024] {
         let a: Vec<f32> = (0..sz * sz).map(|i| (i % 7) as f32 * 0.1).collect();
         let b: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
         let mut c = vec![0f32; sz * sz];
-        let it = if sz >= 1024 { 5 } else { 20 };
+        let it = if sz >= 1024 { 3 } else { 10 };
         acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
         let mut t = vec![0u64; it];
         for i in 0..it {
@@ -250,14 +263,20 @@ fn main() {
 
     // ---- AMX RAW OPS ----
     eprintln!("\n--- AMX Raw Instruction Throughput ---");
+    // Warm AMX via a tiny sgemm (ensure_amx already called, no double SET).
+    {
+        let ta = [1.0f32; 256];
+        let tb = [1.0f32; 256];
+        let mut tc = [0.0f32; 256];
+        acpu::sgemm(&ta, &tb, &mut tc, 16, 16, 16);
+    }
     unsafe {
-        acpu::matrix::asm::amx_set();
         #[repr(align(128))]
         struct A128([f32; 64]);
         let mut b = A128([1.0; 64]);
         let p = b.0.as_mut_ptr() as *mut u8;
-        let it = 500;
-        let ops = 100;
+        let it = 100;
+        let ops = 50;
         let mut t = vec![0u64; it];
 
         macro_rules! amx_bench {
@@ -305,14 +324,173 @@ fn main() {
         amx_bench!("MAC16 (i16 32×32)", { acpu::matrix::asm::OP_MAC16 }, fop);
         amx_bench!("FMA64 (8×8 f64)", { acpu::matrix::asm::OP_FMA64 }, fop);
 
-        // Unknown opcodes 18-22
-        amx_bench!("OP18 (unknown — i32 reduced?)", 18, fop);
-        amx_bench!("OP19 (unknown — dot product?)", 19, fop);
-        amx_bench!("OP20 (unknown — i32 matrix?)", 20, fop);
-        amx_bench!("OP21 (unknown — f32 matrix?)", 21, fop);
-        amx_bench!("OP22 (unknown — X extract?)", 22, fop);
+        // LDZI/STZI (interleaved)
+        amx_bench!(
+            "LDZI (interleaved load)",
+            { acpu::matrix::asm::OP_LDZI },
+            p as u64
+        );
+        amx_bench!(
+            "STZI (interleaved store)",
+            { acpu::matrix::asm::OP_STZI },
+            p as u64
+        );
+    }
 
-        acpu::matrix::asm::amx_clr();
+    // ---- MEMORY BANDWIDTH ----
+    eprintln!("\n--- Memory Bandwidth ---");
+    {
+        // Use NEON vectorized sum for bandwidth measurement
+        for &(sz, label) in &[
+            (4096, "L1 (16KB)"),
+            (65536, "L2 (256KB)"),
+            (1048576, "L3 (4MB)"),
+        ] {
+            let data: Vec<f32> = vec![1.0; sz];
+            let rd_iters = if sz > 100_000 { 50 } else { 200 };
+            let lbl = format!("read bandwidth {}", label);
+            bench(&lbl, rd_iters, sz, || {
+                std::hint::black_box(acpu::vector::reduce::sum(&data));
+            });
+        }
+    }
+
+    // ---- SYNC PRIMITIVES ----
+    eprintln!("\n--- Sync Primitives ---");
+    {
+        let sync_iters = 10000;
+        bench("DMB ISH (data memory barrier)", sync_iters, 1, || unsafe {
+            acpu::sync::dmb_ish();
+        });
+        bench("DSB ISH (data sync barrier)", sync_iters, 1, || unsafe {
+            acpu::sync::dsb_ish();
+        });
+        bench("ISB (instruction sync barrier)", sync_iters, 1, || unsafe {
+            acpu::sync::isb();
+        });
+        let dummy = [0u8; 64];
+        bench("prefetch_l1", sync_iters, 1, || unsafe {
+            acpu::sync::prefetch::prefetch_l1(dummy.as_ptr());
+        });
+    }
+
+    // ---- CORE AFFINITY ----
+    eprintln!("\n--- Core Affinity ---");
+    {
+        use std::time::Instant;
+        let s = Instant::now();
+        let _ = acpu::sync::affinity::pin_p_core();
+        let p_ns = s.elapsed().as_nanos();
+        eprintln!(
+            "  pin_p_core                                 {:>6} ns",
+            p_ns
+        );
+
+        let s = Instant::now();
+        let _ = acpu::sync::affinity::pin_e_core();
+        let e_ns = s.elapsed().as_nanos();
+        eprintln!(
+            "  pin_e_core                                 {:>6} ns",
+            e_ns
+        );
+
+        let s = Instant::now();
+        let _ = acpu::sync::affinity::pin_any();
+        let a_ns = s.elapsed().as_nanos();
+        eprintln!(
+            "  pin_any (reset)                            {:>6} ns",
+            a_ns
+        );
+    }
+
+    // ---- PMU COUNTERS ----
+    eprintln!("\n--- PMU Counter Overhead ---");
+    {
+        if let Ok(mut ctx) = acpu::pulse::PulseCtx::new(&[
+            acpu::pulse::Counter::Cycles,
+            acpu::pulse::Counter::Instructions,
+        ]) {
+            ctx.start();
+            let pmu_iters = 1000;
+            let mut t = vec![0u64; pmu_iters];
+            for i in 0..pmu_iters {
+                let s = Instant::now();
+                let _ = ctx.read();
+                t[i] = s.elapsed().as_nanos() as u64;
+            }
+            let ns = median(&mut t);
+            eprintln!(
+                "  PulseCtx::read() (2 counters)              {:>6} ns/read",
+                ns
+            );
+            ctx.stop();
+        } else {
+            eprintln!("  PMU not available (needs sudo or entitlements)");
+        }
+    }
+
+    // ---- NEON RAW SIMD ----
+    eprintln!("\n--- NEON Raw SIMD Throughput ---");
+    {
+        let n = 4096usize;
+        let a: Vec<f32> = (0..n).map(|i| i as f32 * 0.001).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i + 1) as f32 * 0.001).collect();
+        let mut c = vec![0f32; n];
+        let iters = 1000;
+
+        // FMA throughput: c[i] += a[i] * b[i]
+        bench("NEON fmla (4-wide FMA)", iters, n, || unsafe {
+            use core::arch::aarch64::*;
+            let mut i = 0;
+            while i + 16 <= n {
+                let a0 = vld1q_f32(a.as_ptr().add(i));
+                let a1 = vld1q_f32(a.as_ptr().add(i + 4));
+                let a2 = vld1q_f32(a.as_ptr().add(i + 8));
+                let a3 = vld1q_f32(a.as_ptr().add(i + 12));
+                let b0 = vld1q_f32(b.as_ptr().add(i));
+                let b1 = vld1q_f32(b.as_ptr().add(i + 4));
+                let b2 = vld1q_f32(b.as_ptr().add(i + 8));
+                let b3 = vld1q_f32(b.as_ptr().add(i + 12));
+                let c0 = vld1q_f32(c.as_ptr().add(i));
+                let c1 = vld1q_f32(c.as_ptr().add(i + 4));
+                let c2 = vld1q_f32(c.as_ptr().add(i + 8));
+                let c3 = vld1q_f32(c.as_ptr().add(i + 12));
+                vst1q_f32(c.as_mut_ptr().add(i), vfmaq_f32(c0, a0, b0));
+                vst1q_f32(c.as_mut_ptr().add(i + 4), vfmaq_f32(c1, a1, b1));
+                vst1q_f32(c.as_mut_ptr().add(i + 8), vfmaq_f32(c2, a2, b2));
+                vst1q_f32(c.as_mut_ptr().add(i + 12), vfmaq_f32(c3, a3, b3));
+                i += 16;
+            }
+        });
+
+        // FADD throughput
+        bench("NEON fadd (4-wide add)", iters, n, || unsafe {
+            use core::arch::aarch64::*;
+            let mut i = 0;
+            while i + 16 <= n {
+                let a0 = vld1q_f32(a.as_ptr().add(i));
+                let b0 = vld1q_f32(b.as_ptr().add(i));
+                let a1 = vld1q_f32(a.as_ptr().add(i + 4));
+                let b1 = vld1q_f32(b.as_ptr().add(i + 4));
+                let a2 = vld1q_f32(a.as_ptr().add(i + 8));
+                let b2 = vld1q_f32(b.as_ptr().add(i + 8));
+                let a3 = vld1q_f32(a.as_ptr().add(i + 12));
+                let b3 = vld1q_f32(b.as_ptr().add(i + 12));
+                vst1q_f32(c.as_mut_ptr().add(i), vaddq_f32(a0, b0));
+                vst1q_f32(c.as_mut_ptr().add(i + 4), vaddq_f32(a1, b1));
+                vst1q_f32(c.as_mut_ptr().add(i + 8), vaddq_f32(a2, b2));
+                vst1q_f32(c.as_mut_ptr().add(i + 12), vaddq_f32(a3, b3));
+                i += 16;
+            }
+        });
+    }
+
+    // ---- CHIP INFO ----
+    eprintln!("\n--- Hardware ---");
+    {
+        let caps = acpu::probe::detect();
+        eprintln!("  chip: {:?}", caps.chip);
+        eprintln!("  P-cores: {}, E-cores: {}", caps.p_cores, caps.e_cores);
     }
 
     eprintln!("\n=== done ===");
