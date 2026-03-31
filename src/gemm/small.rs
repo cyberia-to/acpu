@@ -1,14 +1,13 @@
 //! Direct AMX path for small matrices. Zero heap allocation.
 //! No B packing — loads B directly with row stride via LDX.
-//! Preload C → AMX compute → store C directly (no AMX→CPU sync).
+//! NEON A packing via pack_a_mr. Preload C → compute → store C.
 
 use super::{MR, NR};
 use crate::matrix;
 use crate::matrix::tile;
-use core::mem::MaybeUninit;
 
-/// Direct AMX sgemm for small matrices (m≤16, n≤16, k≤64).
-/// Zero heap alloc. No B packing — direct strided LDX loads.
+/// Direct AMX sgemm for small matrices where n*k ≤ 32K.
+/// No B packing, NEON A packing, stack-allocated buffers.
 #[cfg(target_arch = "aarch64")]
 pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     let ctx = match matrix::AmxCtx::new() {
@@ -16,41 +15,26 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
         Err(_) => return,
     };
 
-    // Pack A on stack using MaybeUninit — no zero-fill overhead.
-    #[repr(align(64))]
-    struct APack([MaybeUninit<f32>; 128 * 512]);
+    // Use thread-local warm buffer for A pack (avoids cold cache RFO).
+    let a_need = m.div_ceil(MR) * MR * k;
+    let mut a_pack = super::PACK_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        super::cached_buf(&mut cache.a, a_need)
+    });
 
-    let mut a_buf: APack = unsafe { MaybeUninit::uninit().assume_init() };
-    let a_pack = &mut a_buf.0[..];
+    // NEON-accelerated A packing via pack_a_mr.
+    super::pack_a_mr(a, k, 0, 0, m, k, a_pack.as_mut_slice());
 
+    let bs = n * 4; // B stride in bytes
     let n_mr = m.div_ceil(MR);
-    for s in 0..n_mr {
-        let rs = s * MR;
-        let rows = MR.min(m - rs);
-        let base = s * k * MR;
-        for i in 0..rows {
-            let a_row = (rs + i) * k;
-            for p in 0..k {
-                a_pack[base + p * MR + i] = MaybeUninit::new(a[a_row + p]);
-            }
-        }
-        for i in rows..MR {
-            for p in 0..k {
-                a_pack[base + p * MR + i] = MaybeUninit::new(0.0);
-            }
-        }
-    }
-
-    // B stride in bytes for direct row-major access.
-    let bs = n * 4;
     let n_nr = n.div_ceil(NR);
 
     unsafe {
         for ir in 0..n_mr {
             let mr = MR.min(m - ir * MR);
-            let ap = a_pack.as_ptr().add(ir * k * MR) as *const u8;
+            let ap = a_pack.as_slice().as_ptr().add(ir * k * MR) as *const u8;
 
-            // Quad-wide: 4 B strips at once, direct from b[].
+            // Quad-wide: 4 B strips, direct from b[].
             let mut jr = 0usize;
             while jr + 4 <= n_nr && mr == MR && (n - jr * NR) >= 4 * NR {
                 let cp = c.as_mut_ptr().add(ir * MR * n + jr * NR);
@@ -98,6 +82,7 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
                     tile::microkernel_16x16_acc(ap, b.as_ptr().add(jr * NR) as *const u8, k, bs);
                     tile::store_c(cp, n, 0);
                 } else {
+                    // Edge tile: scalar.
                     for i in 0..mr {
                         for j in 0..nr {
                             let mut acc = 0.0f32;
@@ -114,4 +99,9 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
     }
 
     drop(ctx);
+
+    // Return buffer to thread-local cache for reuse.
+    super::PACK_CACHE.with(|c| {
+        c.borrow_mut().a = Some(a_pack);
+    });
 }
