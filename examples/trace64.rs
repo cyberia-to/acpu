@@ -181,6 +181,7 @@ fn main() {
                 b_pack.0.as_ptr().add(2 * N * NR) as *const u8,
                 b_pack.0.as_ptr().add(3 * N * NR) as *const u8,
                 N,
+                64,
             );
 
             // Store 4 C tiles
@@ -224,6 +225,7 @@ fn main() {
                 bp.as_ptr().add(2 * N * NR) as *const u8,
                 bp.as_ptr().add(3 * N * NR) as *const u8,
                 N,
+                64,
             );
             for t in 0u8..4 {
                 acpu::matrix::tile::store_c(cp.add(t as usize * NR), N, t);
@@ -425,6 +427,7 @@ fn main() {
                 sb.0.as_ptr().add(2 * N * NR) as *const u8,
                 sb.0.as_ptr().add(3 * N * NR) as *const u8,
                 N,
+                64,
             );
             for t in 0u8..4 {
                 acpu::matrix::tile::store_c(cp.add(t as usize * NR), N, t);
@@ -511,6 +514,7 @@ fn main() {
                 sb_slice.as_ptr().add(2 * N * NR) as *const u8,
                 sb_slice.as_ptr().add(3 * N * NR) as *const u8,
                 N,
+                64,
             );
             for t in 0u8..4 {
                 acpu::matrix::tile::store_c(cp.add(t as usize * NR), N, t);
@@ -541,6 +545,7 @@ fn main() {
                 b_pack.0.as_ptr().add(2 * N * NR) as *const u8,
                 b_pack.0.as_ptr().add(3 * N * NR) as *const u8,
                 N,
+                64,
             );
             for t in 0u8..4 {
                 acpu::matrix::tile::store_c(cp.add(t as usize * NR), N, t);

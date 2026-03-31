@@ -119,8 +119,9 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     #[cfg(target_arch = "aarch64")]
     {
         let flops = 2 * m * n * k;
-        // Small matrices: direct AMX for tiny edge cases.
-        if m <= 16 && n <= 16 && k <= 64 {
+        // Small matrices: direct AMX, no B packing (stride LDX).
+        // B fits in L1 when n*k*4 ≤ 128KB.
+        if n * k <= 32768 {
             small::sgemm_amx_direct(a, b, c, m, n, k);
         } else {
             let p_cores = crate::probe::detect().p_cores as usize;
@@ -275,21 +276,21 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
         (a, b)
     });
 
-    // Goto BLAS loop order: pack A once per (pc, ic), reuse across all jc.
-    // A stays in L2 while B panels stream through.
+    // Loop order: pc → jc → ic. Pack B once per (pc, jc), reuse across ic.
+    // B stays in L2 while A panels are repacked per ic (smaller, NEON-fast).
     let mut pc = 0;
     while pc < k {
         let kc = (k - pc).min(kc_max);
 
-        let mut ic = 0;
-        while ic < m {
-            let mc = (m - ic).min(mc_max);
-            pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
+        let mut jc = 0;
+        while jc < n {
+            let nc = (n - jc).min(nc_max);
+            pack_b_nr(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
 
-            let mut jc = 0;
-            while jc < n {
-                let nc = (n - jc).min(nc_max);
-                pack_b_nr(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
+            let mut ic = 0;
+            while ic < m {
+                let mc = (m - ic).min(mc_max);
+                pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
                 gebp_kernel(
                     &ctx,
                     a_pack.as_slice(),
@@ -302,9 +303,9 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
                     nc,
                     kc,
                 );
-                jc += nc;
+                ic += mc;
             }
-            ic += mc;
+            jc += nc;
         }
         pc += kc;
     }
@@ -529,7 +530,7 @@ pub(super) fn gebp_kernel(
                 for t in 0u8..4 {
                     matrix::tile::preload_c(c_base.add(t as usize * NR), n, t);
                 }
-                matrix::tile::microkernel_16x64_acc(a_ptr, b0, b1, b2, b3, kc);
+                matrix::tile::microkernel_16x64_acc(a_ptr, b0, b1, b2, b3, kc, 64);
                 for t in 0u8..4 {
                     matrix::tile::store_c(c_base.add(t as usize * NR), n, t);
                 }
@@ -547,7 +548,7 @@ pub(super) fn gebp_kernel(
                 let c1 = c.as_mut_ptr().add((ic + ir) * n + jc + jr + NR);
                 matrix::tile::preload_c(c0, n, 0);
                 matrix::tile::preload_c(c1, n, 1);
-                matrix::tile::microkernel_16x32_acc(a_ptr, bl, br, kc);
+                matrix::tile::microkernel_16x32_acc(a_ptr, bl, br, kc, 64);
                 matrix::tile::store_c(c0, n, 0);
                 matrix::tile::store_c(c1, n, 1);
             }
@@ -563,7 +564,7 @@ pub(super) fn gebp_kernel(
                     let bp = b_base.add(jr_strip * kc * NR) as *const u8;
                     let cp = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
                     matrix::tile::preload_c(cp, n, 0);
-                    matrix::tile::microkernel_16x16_acc(a_ptr, bp, kc);
+                    matrix::tile::microkernel_16x16_acc(a_ptr, bp, kc, 64);
                     matrix::tile::store_c(cp, n, 0);
                 }
             } else {

@@ -346,6 +346,7 @@ fn decompose(n: usize) {
                     b2.0.as_ptr() as *const u8,
                     b3.0.as_ptr() as *const u8,
                     n,
+                    64,
                 );
                 for t in 0u8..4 {
                     acpu::matrix::tile::store_c(cp.add(t as usize * MR), n, t);

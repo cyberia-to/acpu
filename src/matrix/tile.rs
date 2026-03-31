@@ -98,18 +98,18 @@ pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize
 /// # Safety
 /// AMX must be active. Z tile must be preloaded. Panels: 64-byte aligned, `k*64` bytes.
 #[inline]
-pub unsafe fn microkernel_16x16_acc(a_panel: *const u8, b_panel: *const u8, k: usize) {
+pub unsafe fn microkernel_16x16_acc(a_panel: *const u8, b_panel: *const u8, k: usize, bs: usize) {
     let mut p = 0usize;
 
     while p + 8 <= k {
         if p + 16 <= k {
             for i in (0..8).step_by(4) {
-                crate::sync::prefetch::prefetch_l1(b_panel.add((p + 8 + i) * 64));
+                crate::sync::prefetch::prefetch_l1(b_panel.add((p + 8 + i) * bs));
                 crate::sync::prefetch::prefetch_l1(a_panel.add((p + 8 + i) * 64));
             }
         }
         for i in 0u8..8 {
-            amx_op::<OP_LDX>((b_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+            amx_op::<OP_LDX>((b_panel.add((p + i as usize) * bs) as u64) | ((i as u64) << 56));
             amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
         }
         for i in 0u8..8 {
@@ -119,7 +119,7 @@ pub unsafe fn microkernel_16x16_acc(a_panel: *const u8, b_panel: *const u8, k: u
     }
 
     while p < k {
-        amx_op::<OP_LDX>(b_panel.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b_panel.add(p * bs) as u64);
         amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
         p += 1;
@@ -407,10 +407,11 @@ pub unsafe fn microkernel_16x64(
 // ---------------------------------------------------------------------------
 
 /// AMX 16×64 microkernel that accumulates into existing Z tiles 0-3.
-/// Use after `preload_c` for all 4 tiles.
+/// `bs` = B stride in bytes (64 for packed NR-wide strips, n*4 for direct row-major).
 ///
 /// # Safety
-/// AMX must be active. Z tiles must be preloaded. All panels: 64-byte aligned, `k*64` bytes.
+/// AMX must be active. Z tiles must be preloaded. A panel: 64-byte stride.
+/// B panels: `bs`-byte stride, each row = 64 readable bytes.
 #[inline]
 pub unsafe fn microkernel_16x64_acc(
     a_panel: *const u8,
@@ -419,26 +420,26 @@ pub unsafe fn microkernel_16x64_acc(
     b2: *const u8,
     b3: *const u8,
     k: usize,
+    bs: usize,
 ) {
     let mut p = 0usize;
 
-    // All batches use fma_acc (no skip_z) since Z already has C.
     while p + 2 <= k {
         if p + 4 <= k {
             crate::sync::prefetch::prefetch_l1(a_panel.add((p + 2) * 64));
-            crate::sync::prefetch::prefetch_l1(b0.add((p + 2) * 64));
+            crate::sync::prefetch::prefetch_l1(b0.add((p + 2) * bs));
         }
 
         let a0 = a_panel.add(p * 64) as u64;
         let a1 = (a_panel.add((p + 1) * 64) as u64) | (1u64 << 56);
-        let bx0 = b0.add(p * 64) as u64;
-        let bx1 = (b1.add(p * 64) as u64) | (1u64 << 56);
-        let bx2 = (b2.add(p * 64) as u64) | (2u64 << 56);
-        let bx3 = (b3.add(p * 64) as u64) | (3u64 << 56);
-        let bx4 = (b0.add((p + 1) * 64) as u64) | (4u64 << 56);
-        let bx5 = (b1.add((p + 1) * 64) as u64) | (5u64 << 56);
-        let bx6 = (b2.add((p + 1) * 64) as u64) | (6u64 << 56);
-        let bx7 = (b3.add((p + 1) * 64) as u64) | (7u64 << 56);
+        let bx0 = b0.add(p * bs) as u64;
+        let bx1 = (b1.add(p * bs) as u64) | (1u64 << 56);
+        let bx2 = (b2.add(p * bs) as u64) | (2u64 << 56);
+        let bx3 = (b3.add(p * bs) as u64) | (3u64 << 56);
+        let bx4 = (b0.add((p + 1) * bs) as u64) | (4u64 << 56);
+        let bx5 = (b1.add((p + 1) * bs) as u64) | (5u64 << 56);
+        let bx6 = (b2.add((p + 1) * bs) as u64) | (6u64 << 56);
+        let bx7 = (b3.add((p + 1) * bs) as u64) | (7u64 << 56);
 
         let f0 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
         let f1 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
@@ -455,13 +456,12 @@ pub unsafe fn microkernel_16x64_acc(
         p += 2;
     }
 
-    // Remainder.
     if p < k {
         amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
-        amx_op::<OP_LDX>(b0.add(p * 64) as u64);
-        amx_op::<OP_LDX>((b1.add(p * 64) as u64) | (1u64 << 56));
-        amx_op::<OP_LDX>((b2.add(p * 64) as u64) | (2u64 << 56));
-        amx_op::<OP_LDX>((b3.add(p * 64) as u64) | (3u64 << 56));
+        amx_op::<OP_LDX>(b0.add(p * bs) as u64);
+        amx_op::<OP_LDX>((b1.add(p * bs) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b2.add(p * bs) as u64) | (2u64 << 56));
+        amx_op::<OP_LDX>((b3.add(p * bs) as u64) | (3u64 << 56));
 
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
@@ -485,21 +485,22 @@ pub unsafe fn microkernel_16x32_acc(
     b_left: *const u8,
     b_right: *const u8,
     k: usize,
+    bs: usize,
 ) {
     let mut p = 0usize;
 
     while p + 4 <= k {
         if p + 8 <= k {
             crate::sync::prefetch::prefetch_l1(a_panel.add((p + 4) * 64));
-            crate::sync::prefetch::prefetch_l1(b_left.add((p + 4) * 64));
-            crate::sync::prefetch::prefetch_l1(b_right.add((p + 4) * 64));
+            crate::sync::prefetch::prefetch_l1(b_left.add((p + 4) * bs));
+            crate::sync::prefetch::prefetch_l1(b_right.add((p + 4) * bs));
         }
 
         for i in 0u8..4 {
             amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
         }
         for i in 0u8..4 {
-            amx_op::<OP_LDX>((b_left.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+            amx_op::<OP_LDX>((b_left.add((p + i as usize) * bs) as u64) | ((i as u64) << 56));
         }
         for i in 0u8..4 {
             amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
@@ -507,7 +508,7 @@ pub unsafe fn microkernel_16x32_acc(
 
         for i in 0u8..4 {
             amx_op::<OP_LDX>(
-                (b_right.add((p + i as usize) * 64) as u64) | (((4 + i) as u64) << 56),
+                (b_right.add((p + i as usize) * bs) as u64) | (((4 + i) as u64) << 56),
             );
         }
         for i in 0u8..4 {
@@ -523,10 +524,10 @@ pub unsafe fn microkernel_16x32_acc(
 
     while p < k {
         amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
-        amx_op::<OP_LDX>(b_left.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b_left.add(p * bs) as u64);
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
 
-        amx_op::<OP_LDX>((b_right.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b_right.add(p * bs) as u64) | (1u64 << 56));
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
 
         p += 1;
