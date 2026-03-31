@@ -135,8 +135,8 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     #[cfg(target_arch = "aarch64")]
     {
         let flops = 2 * m * n * k;
-        // Small matrices where AMX tile utilization is poor: NEON is faster.
-        // AMX needs full 16×16 tiles; sizes < 32 waste >50% on scalar edges.
+        // NEON 4×16 microkernel beats AMX for sizes < 32 (packing overhead
+        // dominates). AMX wins at 32+ where full tiles amortize setup cost.
         if m < 2 * MR || n < 2 * NR {
             sgemm_neon(a, b, c, m, n, k);
             return;
@@ -654,15 +654,89 @@ fn edge_kernel(
 // Fallbacks
 // ---------------------------------------------------------------------------
 
-/// NEON sgemm for small matrices. 4-row blocking: one B load serves 4 A rows.
+/// NEON sgemm for small matrices.
+///
+/// 4×16 microkernel: 4 rows × 16 columns, 16 NEON accumulators.
+/// Each k step: 1 A scalar broadcast × 4 B loads = 4 FMA per row = 16 FMA total.
+/// 16 accumulators saturate NEON FMA throughput (4-cycle latency, 2 pipes).
 #[cfg(target_arch = "aarch64")]
 fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     use core::arch::aarch64::*;
     unsafe {
         let mut i = 0;
-        // 4-row block: load B[p, j..j+4] once, FMA into 4 rows of C.
         while i + 4 <= m {
             let mut j = 0;
+            // 4×16 block: 16 accumulators, one B load serves 4 rows.
+            while j + 16 <= n {
+                // 4 rows × 4 NEON regs = 16 accumulators.
+                let mut c00 = vld1q_f32(c.as_ptr().add(i * n + j));
+                let mut c01 = vld1q_f32(c.as_ptr().add(i * n + j + 4));
+                let mut c02 = vld1q_f32(c.as_ptr().add(i * n + j + 8));
+                let mut c03 = vld1q_f32(c.as_ptr().add(i * n + j + 12));
+                let mut c10 = vld1q_f32(c.as_ptr().add((i + 1) * n + j));
+                let mut c11 = vld1q_f32(c.as_ptr().add((i + 1) * n + j + 4));
+                let mut c12 = vld1q_f32(c.as_ptr().add((i + 1) * n + j + 8));
+                let mut c13 = vld1q_f32(c.as_ptr().add((i + 1) * n + j + 12));
+                let mut c20 = vld1q_f32(c.as_ptr().add((i + 2) * n + j));
+                let mut c21 = vld1q_f32(c.as_ptr().add((i + 2) * n + j + 4));
+                let mut c22 = vld1q_f32(c.as_ptr().add((i + 2) * n + j + 8));
+                let mut c23 = vld1q_f32(c.as_ptr().add((i + 2) * n + j + 12));
+                let mut c30 = vld1q_f32(c.as_ptr().add((i + 3) * n + j));
+                let mut c31 = vld1q_f32(c.as_ptr().add((i + 3) * n + j + 4));
+                let mut c32 = vld1q_f32(c.as_ptr().add((i + 3) * n + j + 8));
+                let mut c33 = vld1q_f32(c.as_ptr().add((i + 3) * n + j + 12));
+
+                for p in 0..k {
+                    let b_ptr = b.as_ptr().add(p * n + j);
+                    let b0 = vld1q_f32(b_ptr);
+                    let b1 = vld1q_f32(b_ptr.add(4));
+                    let b2 = vld1q_f32(b_ptr.add(8));
+                    let b3 = vld1q_f32(b_ptr.add(12));
+
+                    let a0 = vdupq_n_f32(*a.get_unchecked(i * k + p));
+                    c00 = vfmaq_f32(c00, a0, b0);
+                    c01 = vfmaq_f32(c01, a0, b1);
+                    c02 = vfmaq_f32(c02, a0, b2);
+                    c03 = vfmaq_f32(c03, a0, b3);
+
+                    let a1 = vdupq_n_f32(*a.get_unchecked((i + 1) * k + p));
+                    c10 = vfmaq_f32(c10, a1, b0);
+                    c11 = vfmaq_f32(c11, a1, b1);
+                    c12 = vfmaq_f32(c12, a1, b2);
+                    c13 = vfmaq_f32(c13, a1, b3);
+
+                    let a2 = vdupq_n_f32(*a.get_unchecked((i + 2) * k + p));
+                    c20 = vfmaq_f32(c20, a2, b0);
+                    c21 = vfmaq_f32(c21, a2, b1);
+                    c22 = vfmaq_f32(c22, a2, b2);
+                    c23 = vfmaq_f32(c23, a2, b3);
+
+                    let a3 = vdupq_n_f32(*a.get_unchecked((i + 3) * k + p));
+                    c30 = vfmaq_f32(c30, a3, b0);
+                    c31 = vfmaq_f32(c31, a3, b1);
+                    c32 = vfmaq_f32(c32, a3, b2);
+                    c33 = vfmaq_f32(c33, a3, b3);
+                }
+
+                vst1q_f32(c.as_mut_ptr().add(i * n + j), c00);
+                vst1q_f32(c.as_mut_ptr().add(i * n + j + 4), c01);
+                vst1q_f32(c.as_mut_ptr().add(i * n + j + 8), c02);
+                vst1q_f32(c.as_mut_ptr().add(i * n + j + 12), c03);
+                vst1q_f32(c.as_mut_ptr().add((i + 1) * n + j), c10);
+                vst1q_f32(c.as_mut_ptr().add((i + 1) * n + j + 4), c11);
+                vst1q_f32(c.as_mut_ptr().add((i + 1) * n + j + 8), c12);
+                vst1q_f32(c.as_mut_ptr().add((i + 1) * n + j + 12), c13);
+                vst1q_f32(c.as_mut_ptr().add((i + 2) * n + j), c20);
+                vst1q_f32(c.as_mut_ptr().add((i + 2) * n + j + 4), c21);
+                vst1q_f32(c.as_mut_ptr().add((i + 2) * n + j + 8), c22);
+                vst1q_f32(c.as_mut_ptr().add((i + 2) * n + j + 12), c23);
+                vst1q_f32(c.as_mut_ptr().add((i + 3) * n + j), c30);
+                vst1q_f32(c.as_mut_ptr().add((i + 3) * n + j + 4), c31);
+                vst1q_f32(c.as_mut_ptr().add((i + 3) * n + j + 8), c32);
+                vst1q_f32(c.as_mut_ptr().add((i + 3) * n + j + 12), c33);
+                j += 16;
+            }
+            // 4×4 remainder columns.
             while j + 4 <= n {
                 let mut c0 = vld1q_f32(c.as_ptr().add(i * n + j));
                 let mut c1 = vld1q_f32(c.as_ptr().add((i + 1) * n + j));

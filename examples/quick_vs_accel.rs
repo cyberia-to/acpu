@@ -5,10 +5,20 @@ use std::time::Instant;
 #[link(name = "Accelerate", kind = "framework")]
 extern "C" {
     fn cblas_sgemm(
-        order: i32, transa: i32, transb: i32,
-        m: i32, n: i32, k: i32, alpha: f32,
-        a: *const f32, lda: i32, b: *const f32, ldb: i32,
-        beta: f32, c: *mut f32, ldc: i32,
+        order: i32,
+        transa: i32,
+        transb: i32,
+        m: i32,
+        n: i32,
+        k: i32,
+        alpha: f32,
+        a: *const f32,
+        lda: i32,
+        b: *const f32,
+        ldb: i32,
+        beta: f32,
+        c: *mut f32,
+        ldc: i32,
     );
 }
 
@@ -18,11 +28,29 @@ fn median_of(times: &mut [u64]) -> u64 {
 }
 
 const SIZES: &[(usize, usize)] = &[
-    (2, 200), (3, 200), (4, 200), (6, 200), (8, 200),
-    (10, 200), (12, 200), (16, 100), (20, 100), (24, 100),
-    (32, 100), (48, 50), (64, 50), (96, 30), (128, 30),
-    (192, 20), (256, 20), (384, 10), (512, 10),
-    (768, 7), (1024, 7), (2048, 5), (4096, 3),
+    (2, 200),
+    (3, 200),
+    (4, 200),
+    (6, 200),
+    (8, 200),
+    (10, 200),
+    (12, 200),
+    (16, 100),
+    (20, 100),
+    (24, 100),
+    (32, 100),
+    (48, 50),
+    (64, 50),
+    (96, 30),
+    (128, 30),
+    (192, 20),
+    (256, 20),
+    (384, 10),
+    (512, 10),
+    (768, 7),
+    (1024, 7),
+    (2048, 5),
+    (4096, 3),
 ];
 
 fn make_matrices(sz: usize) -> (Vec<f32>, Vec<f32>) {
@@ -63,29 +91,59 @@ fn main() {
             let (a, b) = make_matrices(sz);
             let mut c = vec![0.0f32; sz * sz];
             unsafe {
-                cblas_sgemm(101, 111, 111, sz as i32, sz as i32, sz as i32,
-                    1.0, a.as_ptr(), sz as i32, b.as_ptr(), sz as i32,
-                    0.0, c.as_mut_ptr(), sz as i32);
+                cblas_sgemm(
+                    101,
+                    111,
+                    111,
+                    sz as i32,
+                    sz as i32,
+                    sz as i32,
+                    1.0,
+                    a.as_ptr(),
+                    sz as i32,
+                    b.as_ptr(),
+                    sz as i32,
+                    0.0,
+                    c.as_mut_ptr(),
+                    sz as i32,
+                );
             }
             let mut t = vec![0u64; iters];
             for i in 0..iters {
                 c.fill(0.0);
                 let s = Instant::now();
                 unsafe {
-                    cblas_sgemm(101, 111, 111, sz as i32, sz as i32, sz as i32,
-                        1.0, a.as_ptr(), sz as i32, b.as_ptr(), sz as i32,
-                        0.0, c.as_mut_ptr(), sz as i32);
+                    cblas_sgemm(
+                        101,
+                        111,
+                        111,
+                        sz as i32,
+                        sz as i32,
+                        sz as i32,
+                        1.0,
+                        a.as_ptr(),
+                        sz as i32,
+                        b.as_ptr(),
+                        sz as i32,
+                        0.0,
+                        c.as_mut_ptr(),
+                        sz as i32,
+                    );
                 }
                 t[i] = s.elapsed().as_nanos() as u64;
             }
             results.push((sz, median_of(&mut t)));
         }
         results
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
     accel_results = accel_results_inner;
 
-    eprintln!("{:>5} {:>8} {:>8} {:>8} {:>8} {:>6}",
-        "size", "acpu_ns", "accel_ns", "acpu_gf", "accel_gf", "ratio");
+    eprintln!(
+        "{:>5} {:>8} {:>8} {:>8} {:>8} {:>6}",
+        "size", "acpu_ns", "accel_ns", "acpu_gf", "accel_gf", "ratio"
+    );
     eprintln!("{}", "-".repeat(52));
     for i in 0..acpu_results.len() {
         let (sz, acpu_ns) = acpu_results[i];
@@ -94,7 +152,9 @@ fn main() {
         let acpu_gf = ops / acpu_ns as f64;
         let accel_gf = ops / acc_ns as f64;
         let ratio = acpu_ns as f64 / acc_ns as f64;
-        eprintln!("{:>5} {:>8} {:>8} {:>8.2} {:>8.2} {:>5.2}x",
-            sz, acpu_ns, acc_ns, acpu_gf, accel_gf, ratio);
+        eprintln!(
+            "{:>5} {:>8} {:>8} {:>8.2} {:>8.2} {:>5.2}x",
+            sz, acpu_ns, acc_ns, acpu_gf, accel_gf, ratio
+        );
     }
 }
