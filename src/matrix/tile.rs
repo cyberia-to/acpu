@@ -4,9 +4,39 @@
 //! - `microkernel_16x16`: single tile, Z tile 0
 //! - `microkernel_16x32`: double-wide, Z tiles 0+1, 2× compute per A load
 
-use super::asm::{amx_op, OP_FMA32, OP_LDX, OP_LDY, OP_STZ};
+use super::asm::{amx_op, OP_FMA32, OP_LDX, OP_LDY, OP_LDZ, OP_STZ};
 use super::fma::{fma_acc, fma_first};
 use super::regs::{XRow, YRow};
+
+// ---------------------------------------------------------------------------
+// C preload / direct store — eliminates AMX→CPU sync overhead
+// ---------------------------------------------------------------------------
+
+/// Load C[16×16] into Z tile via LDZ. No CPU involvement in data path.
+///
+/// # Safety
+/// AMX must be active. `c` must point to `16 * ldc` readable f32 elements.
+#[inline]
+pub unsafe fn preload_c(c: *const f32, ldc: usize, tile: u8) {
+    for j in 0u8..16 {
+        let z_row = j * 4 + tile;
+        let c_addr = (c as *const u8).add(j as usize * ldc * 4);
+        amx_op::<OP_LDZ>((c_addr as u64) | ((z_row as u64) << 56));
+    }
+}
+
+/// Store Z tile directly to C[16×16] via STZ. CPU never reads the data.
+///
+/// # Safety
+/// AMX must be active. `c` must point to `16 * ldc` writable f32 elements.
+#[inline]
+pub unsafe fn store_c(c: *mut f32, ldc: usize, tile: u8) {
+    for j in 0u8..16 {
+        let z_row = j * 4 + tile;
+        let c_addr = (c as *mut u8).add(j as usize * ldc * 4);
+        amx_op::<OP_STZ>((c_addr as u64) | ((z_row as u64) << 56));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 16×16 microkernel (single tile)
@@ -54,6 +84,44 @@ pub unsafe fn microkernel_16x16(a_panel: *const u8, b_panel: *const u8, k: usize
         } else {
             amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
         }
+        p += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16×16 microkernel — accumulate-only (Z preloaded with C)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×16 microkernel that accumulates into existing Z tile 0.
+/// Use after `preload_c` to compute C += A × B without AMX→CPU sync.
+///
+/// # Safety
+/// AMX must be active. Z tile must be preloaded. Panels: 64-byte aligned, `k*64` bytes.
+#[inline]
+pub unsafe fn microkernel_16x16_acc(a_panel: *const u8, b_panel: *const u8, k: usize) {
+    let mut p = 0usize;
+
+    while p + 8 <= k {
+        if p + 16 <= k {
+            for i in (0..8).step_by(4) {
+                crate::sync::prefetch::prefetch_l1(b_panel.add((p + 8 + i) * 64));
+                crate::sync::prefetch::prefetch_l1(a_panel.add((p + 8 + i) * 64));
+            }
+        }
+        for i in 0u8..8 {
+            amx_op::<OP_LDX>((b_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+            amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+        }
+        for i in 0u8..8 {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
+        }
+        p += 8;
+    }
+
+    while p < k {
+        amx_op::<OP_LDX>(b_panel.add(p * 64) as u64);
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
         p += 1;
     }
 }
@@ -329,6 +397,137 @@ pub unsafe fn microkernel_16x64(
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2));
         amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16×64 microkernel — accumulate-only (Z preloaded with C)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×64 microkernel that accumulates into existing Z tiles 0-3.
+/// Use after `preload_c` for all 4 tiles.
+///
+/// # Safety
+/// AMX must be active. Z tiles must be preloaded. All panels: 64-byte aligned, `k*64` bytes.
+#[inline]
+pub unsafe fn microkernel_16x64_acc(
+    a_panel: *const u8,
+    b0: *const u8,
+    b1: *const u8,
+    b2: *const u8,
+    b3: *const u8,
+    k: usize,
+) {
+    let mut p = 0usize;
+
+    // All batches use fma_acc (no skip_z) since Z already has C.
+    while p + 2 <= k {
+        if p + 4 <= k {
+            crate::sync::prefetch::prefetch_l1(a_panel.add((p + 2) * 64));
+            crate::sync::prefetch::prefetch_l1(b0.add((p + 2) * 64));
+        }
+
+        let a0 = a_panel.add(p * 64) as u64;
+        let a1 = (a_panel.add((p + 1) * 64) as u64) | (1u64 << 56);
+        let bx0 = b0.add(p * 64) as u64;
+        let bx1 = (b1.add(p * 64) as u64) | (1u64 << 56);
+        let bx2 = (b2.add(p * 64) as u64) | (2u64 << 56);
+        let bx3 = (b3.add(p * 64) as u64) | (3u64 << 56);
+        let bx4 = (b0.add((p + 1) * 64) as u64) | (4u64 << 56);
+        let bx5 = (b1.add((p + 1) * 64) as u64) | (5u64 << 56);
+        let bx6 = (b2.add((p + 1) * 64) as u64) | (6u64 << 56);
+        let bx7 = (b3.add((p + 1) * 64) as u64) | (7u64 << 56);
+
+        let f0 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+        let f1 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+        let f2 = fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2);
+        let f3 = fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3);
+        let g0 = fma_acc(XRow::new_unchecked(4), YRow::new_unchecked(1), 0);
+        let g1 = fma_acc(XRow::new_unchecked(5), YRow::new_unchecked(1), 1);
+        let g2 = fma_acc(XRow::new_unchecked(6), YRow::new_unchecked(1), 2);
+        let g3 = fma_acc(XRow::new_unchecked(7), YRow::new_unchecked(1), 3);
+
+        fused_batch_16x64(
+            a0, a1, bx0, bx1, bx2, bx3, bx4, bx5, bx6, bx7, f0, f1, f2, f3, g0, g1, g2, g3,
+        );
+        p += 2;
+    }
+
+    // Remainder.
+    if p < k {
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b0.add(p * 64) as u64);
+        amx_op::<OP_LDX>((b1.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>((b2.add(p * 64) as u64) | (2u64 << 56));
+        amx_op::<OP_LDX>((b3.add(p * 64) as u64) | (3u64 << 56));
+
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(0), 2));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(0), 3));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 16×32 microkernel — accumulate-only (Z preloaded with C)
+// ---------------------------------------------------------------------------
+
+/// AMX 16×32 microkernel that accumulates into existing Z tiles 0-1.
+/// Use after `preload_c` for both tiles.
+///
+/// # Safety
+/// AMX must be active. Z tiles must be preloaded. All panels: 64-byte aligned, `k*64` bytes.
+#[inline]
+pub unsafe fn microkernel_16x32_acc(
+    a_panel: *const u8,
+    b_left: *const u8,
+    b_right: *const u8,
+    k: usize,
+) {
+    let mut p = 0usize;
+
+    while p + 4 <= k {
+        if p + 8 <= k {
+            crate::sync::prefetch::prefetch_l1(a_panel.add((p + 4) * 64));
+            crate::sync::prefetch::prefetch_l1(b_left.add((p + 4) * 64));
+            crate::sync::prefetch::prefetch_l1(b_right.add((p + 4) * 64));
+        }
+
+        for i in 0u8..4 {
+            amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+        }
+        for i in 0u8..4 {
+            amx_op::<OP_LDX>((b_left.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
+        }
+        for i in 0u8..4 {
+            amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(i), YRow::new_unchecked(i), 0));
+        }
+
+        for i in 0u8..4 {
+            amx_op::<OP_LDX>(
+                (b_right.add((p + i as usize) * 64) as u64) | (((4 + i) as u64) << 56),
+            );
+        }
+        for i in 0u8..4 {
+            amx_op::<OP_FMA32>(fma_acc(
+                XRow::new_unchecked(4 + i),
+                YRow::new_unchecked(i),
+                1,
+            ));
+        }
+
+        p += 4;
+    }
+
+    while p < k {
+        amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
+        amx_op::<OP_LDX>(b_left.add(p * 64) as u64);
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+
+        amx_op::<OP_LDX>((b_right.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
+
+        p += 1;
     }
 }
 

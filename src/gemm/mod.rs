@@ -7,6 +7,7 @@
 //! parallel across P-cores, falling back to scalar.
 
 mod other;
+mod small;
 
 pub use other::{bgemm, hgemm, qgemm};
 
@@ -86,13 +87,18 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     #[cfg(target_arch = "aarch64")]
     {
         let flops = 2 * m * n * k;
-        let p_cores = crate::probe::detect().p_cores as usize;
-        let max_threads = if m >= MR { m / MR } else { 1 };
-        let n_threads = p_cores.max(1).min(max_threads);
-        if n_threads > 1 && flops > 16_000_000 {
-            sgemm_parallel(a, b, c, m, n, k, n_threads);
+        // Small matrices: direct AMX for tiny edge cases.
+        if m <= 16 && n <= 16 && k <= 64 {
+            small::sgemm_amx_direct(a, b, c, m, n, k);
         } else {
-            sgemm_amx_single(a, b, c, m, n, k);
+            let p_cores = crate::probe::detect().p_cores as usize;
+            let max_threads = if m >= MR { m / MR } else { 1 };
+            let n_threads = p_cores.max(1).min(max_threads);
+            if n_threads > 1 && flops > 16_000_000 {
+                sgemm_parallel(a, b, c, m, n, k, n_threads);
+            } else {
+                sgemm_amx_single(a, b, c, m, n, k);
+            }
         }
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -146,32 +152,36 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
     let ctx = match matrix::AmxCtx::new() {
         Ok(ctx) => ctx,
         Err(_) => {
-            sgemm_neon(a, b, c, m, n, k);
+            sgemm_scalar(a, b, c, m, n, k);
             return;
         }
     };
 
     // L1 constraint: KC × (MR+NR) × 4 ≤ L1D (64KB).
     // A panel (MC×KC) lives in L2 (4MB). Larger MC = fewer M-panels.
-    let kc_max = if k > 256 { 512 } else { 256 };
-    let mc_max = if m > 128 { 256 } else { MC }; // MC=256 → A panel in L2
-    let nc_max = if n > 256 { 512 } else { 256 };
-    let mut a_pack = AlignedBuf::new(mc_max * kc_max);
-    let mut b_pack = AlignedBuf::new(kc_max * nc_max);
+    // Cap to actual dimensions to avoid over-allocation for small matrices.
+    let kc_max = k.min(if k > 256 { 512 } else { 256 });
+    let mc_max = m.min(if m > 128 { 256 } else { MC }); // MC=256 → A panel in L2
+    let nc_max = n.min(if n > 256 { 512 } else { 256 });
+    // Packing works in MR/NR-wide strips, so round up allocation.
+    let mut a_pack = AlignedBuf::new(mc_max.div_ceil(MR) * MR * kc_max);
+    let mut b_pack = AlignedBuf::new(kc_max * nc_max.div_ceil(NR) * NR);
 
+    // Goto BLAS loop order: pack A once per (pc, ic), reuse across all jc.
+    // A stays in L2 while B panels stream through.
     let mut pc = 0;
     while pc < k {
         let kc = (k - pc).min(kc_max);
 
-        let mut jc = 0;
-        while jc < n {
-            let nc = (n - jc).min(nc_max);
-            pack_b_nr(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
+        let mut ic = 0;
+        while ic < m {
+            let mc = (m - ic).min(mc_max);
+            pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
 
-            let mut ic = 0;
-            while ic < m {
-                let mc = (m - ic).min(mc_max);
-                pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
+            let mut jc = 0;
+            while jc < n {
+                let nc = (n - jc).min(nc_max);
+                pack_b_nr(b, n, pc, jc, kc, nc, b_pack.as_mut_slice());
                 gebp_kernel(
                     &ctx,
                     a_pack.as_slice(),
@@ -184,9 +194,9 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
                     nc,
                     kc,
                 );
-                ic += mc;
+                jc += nc;
             }
-            jc += nc;
+            ic += mc;
         }
         pc += kc;
     }
@@ -390,6 +400,8 @@ pub(super) fn gebp_kernel(
         let b_base = b_pack.as_ptr();
 
         // Cascade: 16×64 (4 tiles) → 16×32 (2 tiles) → 16×16 (1 tile).
+        // Preload C → AMX compute → store C directly (no AMX→CPU sync).
+
         // Quad-wide: process 4 B strips at once.
         while jr_strip + 4 <= n_nr && mr_actual == MR && nc - jr_strip * NR >= 4 * NR {
             let jr = jr_strip * NR;
@@ -398,12 +410,13 @@ pub(super) fn gebp_kernel(
                 let b1 = b_base.add((jr_strip + 1) * kc * NR) as *const u8;
                 let b2 = b_base.add((jr_strip + 2) * kc * NR) as *const u8;
                 let b3 = b_base.add((jr_strip + 3) * kc * NR) as *const u8;
-                matrix::tile::microkernel_16x64(a_ptr, b0, b1, b2, b3, kc);
+                let c_base = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
                 for t in 0u8..4 {
-                    let cp = c
-                        .as_mut_ptr()
-                        .add((ic + ir) * n + jc + jr + t as usize * NR);
-                    matrix::tile::accumulate_tile(cp, n, t);
+                    matrix::tile::preload_c(c_base.add(t as usize * NR), n, t);
+                }
+                matrix::tile::microkernel_16x64_acc(a_ptr, b0, b1, b2, b3, kc);
+                for t in 0u8..4 {
+                    matrix::tile::store_c(c_base.add(t as usize * NR), n, t);
                 }
             }
             jr_strip += 4;
@@ -415,11 +428,13 @@ pub(super) fn gebp_kernel(
             unsafe {
                 let bl = b_base.add(jr_strip * kc * NR) as *const u8;
                 let br = b_base.add((jr_strip + 1) * kc * NR) as *const u8;
-                matrix::tile::microkernel_16x32(a_ptr, bl, br, kc);
                 let c0 = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
-                matrix::tile::accumulate_tile(c0, n, 0);
                 let c1 = c.as_mut_ptr().add((ic + ir) * n + jc + jr + NR);
-                matrix::tile::accumulate_tile(c1, n, 1);
+                matrix::tile::preload_c(c0, n, 0);
+                matrix::tile::preload_c(c1, n, 1);
+                matrix::tile::microkernel_16x32_acc(a_ptr, bl, br, kc);
+                matrix::tile::store_c(c0, n, 0);
+                matrix::tile::store_c(c1, n, 1);
             }
             jr_strip += 2;
         }
@@ -431,9 +446,10 @@ pub(super) fn gebp_kernel(
             if mr_actual == MR && nr_actual == NR {
                 unsafe {
                     let bp = b_base.add(jr_strip * kc * NR) as *const u8;
-                    matrix::tile::microkernel_16x16(a_ptr, bp, kc);
                     let cp = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
-                    matrix::tile::accumulate_tile_16x16(cp, n);
+                    matrix::tile::preload_c(cp, n, 0);
+                    matrix::tile::microkernel_16x16_acc(a_ptr, bp, kc);
+                    matrix::tile::store_c(cp, n, 0);
                 }
             } else {
                 edge_kernel(
@@ -478,46 +494,6 @@ fn edge_kernel(
 // Fallbacks
 // ---------------------------------------------------------------------------
 
-/// NEON-tiled sgemm for small matrices. No packing, no AMX, zero overhead.
-/// Uses 4-wide NEON fmla directly on input data.
-#[cfg(target_arch = "aarch64")]
-fn sgemm_neon_tiled(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    use core::arch::aarch64::*;
-    unsafe {
-        let mut i = 0;
-        while i < m {
-            let mut j = 0;
-            while j + 4 <= n {
-                // Accumulate 1×4 block of C.
-                let mut acc = vld1q_f32(c.as_ptr().add(i * n + j));
-                for p in 0..k {
-                    let a_val = vdupq_n_f32(*a.get_unchecked(i * k + p));
-                    let b_vec = vld1q_f32(b.as_ptr().add(p * n + j));
-                    acc = vfmaq_f32(acc, a_val, b_vec);
-                }
-                vst1q_f32(c.as_mut_ptr().add(i * n + j), acc);
-                j += 4;
-            }
-            // Remainder columns.
-            while j < n {
-                let mut acc = *c.get_unchecked(i * n + j);
-                for p in 0..k {
-                    acc += a.get_unchecked(i * k + p) * b.get_unchecked(p * n + j);
-                }
-                *c.get_unchecked_mut(i * n + j) = acc;
-                j += 1;
-            }
-            i += 1;
-        }
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    sgemm_neon_tiled(a, b, c, m, n, k);
-}
-
-#[allow(dead_code)]
 fn sgemm_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     for i in 0..m {
         for j in 0..n {
