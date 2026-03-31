@@ -1,4 +1,5 @@
 //! acpu full driver audit vs Apple frameworks.
+//! Every row: operation | acpu | apple/ref | ratio
 use std::time::Instant;
 
 fn med(t: &mut [u64]) -> u64 {
@@ -24,23 +25,36 @@ fn ns<F: FnMut()>(mut f: F) -> u64 {
     med(&mut t)
 }
 
-fn row(op: &str, _n: usize, acpu_ns: u64, apple_ns: u64) {
-    if apple_ns == 0 || apple_ns == u64::MAX {
-        eprintln!("  {:<16} {:>8} {:>8}   {:>6}", op, acpu_ns, "—", "—");
-    } else {
-        let ratio = acpu_ns as f64 / apple_ns as f64;
+fn hdr() {
+    eprintln!(
+        "  {:<16} {:>8} {:>8}  {:>8} {:>8}  {:>5}",
+        "operation", "acpu", "Ge/s", "apple", "Ge/s", "ratio"
+    );
+    eprintln!("  {}", "─".repeat(58));
+}
+
+fn row(op: &str, n: usize, acpu: u64, apple: u64) {
+    let ag = n as f64 / acpu.max(1) as f64;
+    if apple == 0 || apple == u64::MAX {
         eprintln!(
-            "  {:<16} {:>8} {:>8}   {:>5.2}x",
-            op, acpu_ns, apple_ns, ratio
+            "  {:<16} {:>7}ns {:>7.1}  {:>8} {:>8}  {:>5}",
+            op, acpu, ag, "—", "—", "—"
+        );
+    } else {
+        let apg = n as f64 / apple.max(1) as f64;
+        let r = acpu as f64 / apple as f64;
+        eprintln!(
+            "  {:<16} {:>7}ns {:>7.1}  {:>7}ns {:>7.1}  {:>4.1}x",
+            op, acpu, ag, apple, apg, r
         );
     }
 }
 
 fn row_gf(op: &str, acpu_gf: f64, apple_gf: f64) {
-    let ratio = apple_gf / acpu_gf;
+    let r = apple_gf / acpu_gf;
     eprintln!(
-        "  {:<16} {:>7.0} GF {:>6.0} GF {:>5.2}x",
-        op, acpu_gf, apple_gf, ratio
+        "  {:<16} {:>16.0}GF {:>16.0}GF  {:>4.1}x",
+        op, acpu_gf, apple_gf, r
     );
 }
 
@@ -88,17 +102,13 @@ fn main() {
 
     let c = acpu::probe::detect();
     eprintln!(
-        "=== acpu driver audit — {:?} ({}P+{}E) — {} f32 ===",
+        "=== acpu driver audit — {:?} ({}P+{}E) — {} f32 ===\n",
         c.chip, c.p_cores, c.e_cores, n
     );
-    eprintln!(
-        "  {:<16} {:>8} {:>8}   {:>6}",
-        "operation", "acpu_ns", "apple_ns", "ratio"
-    );
-    eprintln!("  {}", "─".repeat(44));
 
     // ---- VECTOR MATH ----
-    eprintln!("\n  VECTOR MATH");
+    eprintln!("  VECTOR MATH");
+    hdr();
     let mut b = src.clone();
     let mut d = vec![0f32; n];
     row(
@@ -164,6 +174,7 @@ fn main() {
 
     // ---- REDUCTIONS ----
     eprintln!("\n  REDUCTIONS");
+    hdr();
     let mut r = 0f32;
     row(
         "sum",
@@ -210,6 +221,7 @@ fn main() {
 
     // ---- COMPOUND ----
     eprintln!("\n  COMPOUND OPS");
+    hdr();
     row(
         "softmax",
         n,
@@ -230,7 +242,7 @@ fn main() {
     );
     let w: Vec<f32> = (0..n).map(|i| (i % 13) as f32 * 0.1).collect();
     let mut rm = vec![0f32; n];
-    acpu::vector::softmax::rmsnorm(&mut rm, &src, &w, 1e-5); // warmup with real data
+    acpu::vector::softmax::rmsnorm(&mut rm, &src, &w, 1e-5);
     row(
         "rmsnorm",
         n,
@@ -240,67 +252,78 @@ fn main() {
         0,
     );
 
-    // ---- CONVERSIONS ----
-    eprintln!("\n  CONVERSIONS");
+    // ---- CONVERSIONS (compare to memcpy as baseline) ----
+    eprintln!("\n  CONVERSIONS (ref=memcpy)");
+    hdr();
     let fd: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
-    let mut f16 = vec![0u16; n];
+    let mut f16b = vec![0u16; n];
     let mut fo = vec![0f32; n];
-    let mut bf = vec![0u16; n];
-    let mut i8 = vec![0i8; n];
+    let mut bfb = vec![0u16; n];
+    let mut i8b = vec![0i8; n];
+    let memcpy_ns = ns(|| {
+        fo.copy_from_slice(&fd);
+        std::hint::black_box(&fo);
+    });
     row(
         "f32→f16",
         n,
         ns(|| {
-            acpu::cvt_f32_f16(&mut f16, &fd);
+            acpu::cvt_f32_f16(&mut f16b, &fd);
         }),
-        0,
+        memcpy_ns,
     );
-    acpu::cvt_f32_f16(&mut f16, &fd);
+    acpu::cvt_f32_f16(&mut f16b, &fd);
     row(
         "f16→f32",
         n,
         ns(|| {
-            acpu::cvt_f16_f32(&mut fo, &f16);
+            acpu::cvt_f16_f32(&mut fo, &f16b);
         }),
-        0,
+        memcpy_ns,
     );
     row(
         "f32→bf16",
         n,
         ns(|| {
-            acpu::cvt_f32_bf16(&mut bf, &fd);
+            acpu::cvt_f32_bf16(&mut bfb, &fd);
         }),
-        0,
+        memcpy_ns,
     );
-    acpu::cvt_f32_bf16(&mut bf, &fd);
+    acpu::cvt_f32_bf16(&mut bfb, &fd);
     row(
         "bf16→f32",
         n,
         ns(|| {
-            acpu::cvt_bf16_f32(&mut fo, &bf);
+            acpu::cvt_bf16_f32(&mut fo, &bfb);
         }),
-        0,
+        memcpy_ns,
     );
     row(
         "f32→i8",
         n,
         ns(|| {
-            acpu::cvt_f32_i8(&mut i8, &fd, 0.1);
+            acpu::cvt_f32_i8(&mut i8b, &fd, 0.1);
         }),
-        0,
+        memcpy_ns,
     );
-    acpu::cvt_f32_i8(&mut i8, &fd, 0.1);
+    acpu::cvt_f32_i8(&mut i8b, &fd, 0.1);
     row(
         "i8→f32",
         n,
         ns(|| {
-            acpu::cvt_i8_f32(&mut fo, &i8, 0.1, 0);
+            acpu::cvt_i8_f32(&mut fo, &i8b, 0.1, 0);
         }),
-        0,
+        memcpy_ns,
     );
+    eprintln!("  (memcpy 4096 f32 = {} ns baseline)", memcpy_ns);
 
     // ---- GEMM ----
-    eprintln!("\n  GEMM (sgemm)");
+    eprintln!("\n  GEMM");
+    eprintln!(
+        "  {:<16} {:>10} {:>10}  {:>5}",
+        "size", "acpu GF", "apple GF", "ratio"
+    );
+    eprintln!("  {}", "─".repeat(44));
     let ag = std::thread::spawn(|| {
         let mut r = Vec::new();
         for &sz in &[64, 256, 1024] {
@@ -375,10 +398,13 @@ fn main() {
         row_gf(&format!("sgemm {}", sz), ops / an as f64, ops / ac as f64);
     }
 
-    // ---- AMX RAW ----
-    eprintln!("\n  AMX RAW");
-    eprintln!("  {:<16} {:>8} {:>8}", "instruction", "ns/op", "GFLOPS");
-    eprintln!("  {}", "─".repeat(34));
+    // ---- AMX (compare to theoretical peak at 3.2 GHz) ----
+    eprintln!("\n  AMX RAW (ref=theoretical peak)");
+    eprintln!(
+        "  {:<16} {:>8} {:>8}  {:>8} {:>5}",
+        "instruction", "ns/op", "GFLOPS", "peak GF", "util"
+    );
+    eprintln!("  {}", "─".repeat(50));
     {
         let ta = [1f32; 256];
         let tb = [1f32; 256];
@@ -393,6 +419,8 @@ fn main() {
         let it = 100;
         let ops = 50;
         let mut t = vec![0u64; it];
+        // Theoretical: 1 op/cycle at 3.228 GHz
+        let ghz = 3.228;
         macro_rules! amx {
             ($nm:expr,$op:expr,$v:expr,$fl:expr) => {
                 for i in 0..it {
@@ -405,9 +433,27 @@ fn main() {
                 let n = med(&mut t);
                 let npo = n as f64 / ops as f64;
                 if $fl > 0 {
-                    eprintln!("  {:<16} {:>8.1} {:>8.0}", $nm, npo, $fl as f64 / npo);
+                    let actual = $fl as f64 / npo;
+                    let peak = $fl as f64 * ghz;
+                    eprintln!(
+                        "  {:<16} {:>8.1} {:>7.0}   {:>7.0} {:>4.0}%",
+                        $nm,
+                        npo,
+                        actual,
+                        peak,
+                        actual / peak * 100.0
+                    );
                 } else {
-                    eprintln!("  {:<16} {:>8.1}", $nm, npo);
+                    let peak_bw = 64.0 * ghz; // 64 bytes/op * GHz = GB/s
+                    let actual_bw = 64.0 / npo;
+                    eprintln!(
+                        "  {:<16} {:>8.1} {:>7.1}GB {:>7.1}GB {:>4.0}%",
+                        $nm,
+                        npo,
+                        actual_bw,
+                        peak_bw,
+                        actual_bw / peak_bw * 100.0
+                    );
                 }
             };
         }
@@ -418,7 +464,7 @@ fn main() {
         };
         let f = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
         amx!("LDX", { OP_LDX }, p as u64, 0);
-        amx!("LDX pair (128B)", { OP_LDX }, (p as u64) | (1u64 << 62), 0);
+        amx!("LDX pair", { OP_LDX }, (p as u64) | (1u64 << 62), 0);
         amx!("LDY", { OP_LDY }, p as u64, 0);
         amx!("LDZ", { OP_LDZ }, p as u64, 0);
         amx!("STZ", { OP_STZ }, p as u64, 0);
@@ -428,10 +474,16 @@ fn main() {
         amx!("MAC16 i16", { OP_MAC16 }, f, 2048);
     }
 
-    // ---- SYNC ----
-    eprintln!("\n  SYNC");
-    eprintln!("  {:<16} {:>8}", "primitive", "ns/op");
-    eprintln!("  {}", "─".repeat(26));
+    // ---- SYNC (compare to atomic CAS as baseline) ----
+    eprintln!("\n  SYNC (ref=atomic CAS)");
+    let cas_ns = ns(|| {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static A: AtomicU64 = AtomicU64::new(0);
+        std::hint::black_box(A.compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed));
+    });
+    eprintln!("  {:<16} {:>8} {:>8}", "primitive", "ns/op", "ref(CAS)");
+    eprintln!("  {}", "─".repeat(34));
+    eprintln!("  {:<16} {:>8} {:>8}", "atomic CAS", cas_ns, "baseline");
     eprintln!(
         "  {:<16} {:>8}",
         "DMB ISH",
@@ -454,20 +506,31 @@ fn main() {
         })
     );
 
-    // ---- MEMORY ----
-    eprintln!("\n  MEMORY BANDWIDTH");
-    eprintln!("  {:<16} {:>8} {:>8}", "level", "ns", "GB/s");
-    eprintln!("  {}", "─".repeat(34));
+    // ---- MEMORY (compare to memcpy) ----
+    eprintln!("\n  MEMORY BANDWIDTH (ref=memcpy)");
+    eprintln!(
+        "  {:<16} {:>8} {:>8}  {:>8} {:>8}",
+        "level", "sum GB/s", "memcpy", "ratio", ""
+    );
+    eprintln!("  {}", "─".repeat(50));
     for &(sz, label) in &[(4096, "L1 16KB"), (65536, "L2 256KB"), (1048576, "L3 4MB")] {
         let data: Vec<f32> = vec![1.0; sz];
-        let t = ns(|| {
+        let mut dst = vec![0f32; sz];
+        let sum_t = ns(|| {
             std::hint::black_box(acpu::vector::reduce::sum(&data));
         });
+        let cpy_t = ns(|| {
+            dst.copy_from_slice(&data);
+            std::hint::black_box(&dst);
+        });
+        let sum_bw = sz as f64 * 4.0 / sum_t as f64;
+        let cpy_bw = sz as f64 * 4.0 / cpy_t as f64; // read+write
         eprintln!(
-            "  {:<16} {:>8} {:>8.1}",
+            "  {:<16} {:>7.1}  {:>7.1}  {:>7.2}x",
             label,
-            t,
-            sz as f64 * 4.0 / t as f64
+            sum_bw,
+            cpy_bw,
+            sum_bw / cpy_bw
         );
     }
 
