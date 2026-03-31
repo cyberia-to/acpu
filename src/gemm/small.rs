@@ -7,31 +7,37 @@ use crate::matrix::tile;
 
 /// Direct AMX sgemm for small matrices where n*k ≤ 32K.
 /// No B packing, NEON A packing per-strip, thread-local warm buffer.
+///
+/// Per-strip packing: pack strip 0, compute strip 0 (AMX), pack strip 1 (NEON),
+/// compute strip 1, ... The NEON pack after each strip's compute overlaps with
+/// the AMX pipeline draining — AMX FMA and NEON ALU use separate execution units.
 #[cfg(target_arch = "aarch64")]
 pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     super::ensure_amx();
 
-    // Thread-local warm buffer for A pack.
-    let a_need = m.div_ceil(MR) * MR * k;
+    let n_mr = m.div_ceil(MR);
+    let a_need = n_mr * MR * k;
     let mut a_pack = super::PACK_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         super::cached_buf(&mut cache.a, a_need)
     });
 
-    // NEON A packing — all strips at once (fits in L1 for small matrices).
-    super::pack_a_mr(a, k, 0, 0, m, k, a_pack.as_mut_slice());
-
     let bs = n * 4; // B stride in bytes
-    let n_mr = m.div_ceil(MR);
     let n_nr = n.div_ceil(NR);
+
+    // Pack first strip (must be ready before first compute).
+    let first_mc = MR.min(m);
+    super::pack_a_mr(a, k, 0, 0, first_mc, k, a_pack.as_mut_slice());
 
     unsafe {
         for ir in 0..n_mr {
             let mr = MR.min(m - ir * MR);
             let ap = a_pack.as_slice().as_ptr().add(ir * k * MR) as *const u8;
 
-            // Quad-wide: 4 B strips, direct from b[].
+            // ---- AMX compute for strip ir ----
             let mut jr = 0usize;
+
+            // Quad-wide: 4 B strips, direct from b[].
             while jr + 4 <= n_nr && mr == MR && (n - jr * NR) >= 4 * NR {
                 let cp = c.as_mut_ptr().add(ir * MR * n + jr * NR);
                 for t in 0u8..4 {
@@ -89,6 +95,23 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
                     }
                 }
                 jr += 1;
+            }
+
+            // ---- Pack next strip (NEON, overlaps with AMX pipeline drain) ----
+            // AMX FMA/STZ ops are still in-flight; NEON pack uses ALU+load
+            // ports that don't compete with AMX execution units.
+            if ir + 1 < n_mr {
+                let next_mc = MR.min(m - (ir + 1) * MR);
+                let off = (ir + 1) * k * MR;
+                super::pack_a_mr(
+                    a,
+                    k,
+                    (ir + 1) * MR,
+                    0,
+                    next_mc,
+                    k,
+                    &mut a_pack.as_mut_slice()[off..],
+                );
             }
         }
     }

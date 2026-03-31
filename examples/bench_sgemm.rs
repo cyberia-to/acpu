@@ -28,7 +28,7 @@ const CBLAS_NO_TRANS: i32 = 111;
 use std::time::{Duration, Instant};
 
 const SIZES: &[usize] = &[2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
-const ITERS: usize = 100;
+const ITERS: usize = 200;
 
 /// Run `f` for `ITERS` iterations and return the median duration.
 fn bench_median<F: FnMut()>(mut f: F) -> Duration {
