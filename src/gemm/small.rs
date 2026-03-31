@@ -45,13 +45,11 @@ fn sgemm_pair32(
         super::cached_buf(&mut cache.a, a_need)
     });
 
-    // Direct interleaved A pack using NEON: for each k column, transpose
-    // 4×4 blocks from both strips directly into interleaved output.
+    // Pack all pairs upfront, then compute.
     let dst = a_pack.as_mut_slice();
     for pair in 0..n_pairs {
-        let s0 = pair * 2;
         let off = pair * k * MR * 2;
-        pack_a_interleaved_neon(a, k, s0 * MR, k, &mut dst[off..]);
+        pack_a_interleaved_neon(a, k, pair * 2 * MR, k, &mut dst[off..]);
     }
 
     unsafe {
