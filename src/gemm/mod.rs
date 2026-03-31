@@ -29,11 +29,27 @@ pub(super) const MC: usize = 64;
 
 thread_local! {
     static PACK_CACHE: RefCell<PackCache> = const { RefCell::new(PackCache { a: None, b: None }) };
+    /// Persistent AMX context — set once per thread, never cleared.
+    /// Saves 40ns per sgemm call (AMX_SET + AMX_CLR overhead).
+    static AMX_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 struct PackCache {
     a: Option<AlignedBuf>,
     b: Option<AlignedBuf>,
+}
+
+/// Ensure AMX is active on this thread. First call does AMX_SET,
+/// subsequent calls are a no-op (Cell::get = single load).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn ensure_amx() {
+    AMX_ACTIVE.with(|active| {
+        if !active.get() {
+            unsafe { matrix::asm::amx_set() };
+            active.set(true);
+        }
+    });
 }
 
 /// Get or grow a cached pack buffer. Returns a warm buffer (in L1/L2).
@@ -203,10 +219,7 @@ fn sgemm_parallel(
 
             s.spawn(move || {
                 let _ = crate::sync::affinity::pin_p_core();
-                let ctx = match matrix::AmxCtx::new() {
-                    Ok(ctx) => ctx,
-                    Err(_) => return,
-                };
+                ensure_amx();
 
                 let mc = m_this.min(mc_max);
                 let a_need = mc.div_ceil(MR) * MR * kc_max;
@@ -226,7 +239,6 @@ fn sgemm_parallel(
                             let nc = (n - jc).min(nc_max);
                             let off = (pi * n_blocks + ji) * b_block;
                             gebp_kernel(
-                                &ctx,
                                 a_pack.as_slice(),
                                 &b_packed[off..],
                                 c_chunk,
@@ -243,8 +255,6 @@ fn sgemm_parallel(
                     }
                     pc += kc;
                 }
-
-                drop(ctx);
             });
 
             m_start += m_this;
@@ -255,13 +265,7 @@ fn sgemm_parallel(
 /// Single-threaded AMX sgemm (full GEBP).
 #[cfg(target_arch = "aarch64")]
 fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    let ctx = match matrix::AmxCtx::new() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            sgemm_scalar(a, b, c, m, n, k);
-            return;
-        }
-    };
+    ensure_amx();
 
     // L1 constraint: KC × (MR+NR) × 4 ≤ L1D (64KB).
     // A panel (MC×KC) lives in L2 (4MB). Larger MC = fewer M-panels.
@@ -297,7 +301,6 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
                 let mc = (m - ic).min(mc_max);
                 pack_a_mr(a, k, ic, pc, mc, kc, a_pack.as_mut_slice());
                 gebp_kernel(
-                    &ctx,
                     a_pack.as_slice(),
                     b_pack.as_slice(),
                     c,
@@ -314,8 +317,6 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
         }
         pc += kc;
     }
-
-    drop(ctx);
 
     // Return buffers to thread-local cache for reuse.
     PACK_CACHE.with(|c| {
@@ -498,7 +499,6 @@ pub(super) fn pack_b_nr(
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn gebp_kernel(
-    _ctx: &matrix::AmxCtx,
     a_pack: &[f32],
     b_pack: &[f32],
     c: &mut [f32],
@@ -644,6 +644,7 @@ fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize)
     }
 }
 
+#[allow(dead_code)]
 fn sgemm_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     for i in 0..m {
         for j in 0..n {

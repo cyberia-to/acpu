@@ -1,28 +1,24 @@
 //! Direct AMX path for small matrices. Zero heap allocation.
 //! No B packing — loads B directly with row stride via LDX.
-//! NEON A packing via pack_a_mr. Preload C → compute → store C.
+//! A packed strip-by-strip (hot in L1 when used). Preload C → compute → store.
 
 use super::{MR, NR};
-use crate::matrix;
 use crate::matrix::tile;
 
 /// Direct AMX sgemm for small matrices where n*k ≤ 32K.
-/// No B packing, NEON A packing, stack-allocated buffers.
+/// No B packing, NEON A packing per-strip, thread-local warm buffer.
 #[cfg(target_arch = "aarch64")]
 pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
-    let ctx = match matrix::AmxCtx::new() {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    super::ensure_amx();
 
-    // Use thread-local warm buffer for A pack (avoids cold cache RFO).
+    // Thread-local warm buffer for A pack.
     let a_need = m.div_ceil(MR) * MR * k;
     let mut a_pack = super::PACK_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
         super::cached_buf(&mut cache.a, a_need)
     });
 
-    // NEON-accelerated A packing via pack_a_mr.
+    // NEON A packing — all strips at once (fits in L1 for small matrices).
     super::pack_a_mr(a, k, 0, 0, m, k, a_pack.as_mut_slice());
 
     let bs = n * 4; // B stride in bytes
@@ -82,7 +78,6 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
                     tile::microkernel_16x16_acc(ap, b.as_ptr().add(jr * NR) as *const u8, k, bs);
                     tile::store_c(cp, n, 0);
                 } else {
-                    // Edge tile: scalar.
                     for i in 0..mr {
                         for j in 0..nr {
                             let mut acc = 0.0f32;
@@ -97,8 +92,6 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
             }
         }
     }
-
-    drop(ctx);
 
     // Return buffer to thread-local cache for reuse.
     super::PACK_CACHE.with(|c| {
