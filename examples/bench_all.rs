@@ -24,42 +24,23 @@ fn ns<F: FnMut()>(mut f: F) -> u64 {
     med(&mut t)
 }
 
-fn row(op: &str, n: usize, acpu_ns: u64, apple_ns: u64) {
-    let a = n as f64 / acpu_ns as f64;
+fn row(op: &str, _n: usize, acpu_ns: u64, apple_ns: u64) {
     if apple_ns == 0 || apple_ns == u64::MAX {
-        eprintln!(
-            "  {:<20} {:>7} ns {:>6.1} Ge/s {:>10} {:>10}",
-            op, acpu_ns, a, "—", "—"
-        );
+        eprintln!("  {:<16} {:>8} {:>8}   {:>6}", op, acpu_ns, "—", "—");
     } else {
-        let ap = n as f64 / apple_ns as f64;
         let ratio = acpu_ns as f64 / apple_ns as f64;
-        let mark = if ratio <= 1.05 {
-            "WIN"
-        } else if ratio <= 1.2 {
-            "~"
-        } else {
-            ""
-        };
         eprintln!(
-            "  {:<20} {:>7} ns {:>6.1} Ge/s {:>7} ns {:>5.1}x {}",
-            op, acpu_ns, a, apple_ns, ratio, mark
+            "  {:<16} {:>8} {:>8}   {:>5.2}x",
+            op, acpu_ns, apple_ns, ratio
         );
     }
 }
 
 fn row_gf(op: &str, acpu_gf: f64, apple_gf: f64) {
     let ratio = apple_gf / acpu_gf;
-    let mark = if ratio <= 1.05 {
-        "WIN"
-    } else if ratio <= 1.2 {
-        "~"
-    } else {
-        ""
-    };
     eprintln!(
-        "  {:<20} {:>7.0} GF {:>13} {:>7.0} GF {:>5.1}x {}",
-        op, acpu_gf, "", apple_gf, ratio, mark
+        "  {:<16} {:>7.0} GF {:>6.0} GF {:>5.2}x",
+        op, acpu_gf, apple_gf, ratio
     );
 }
 
@@ -111,10 +92,10 @@ fn main() {
         c.chip, c.p_cores, c.e_cores, n
     );
     eprintln!(
-        "  {:<20} {:>7} {:>10} {:>10} {:>10}",
-        "operation", "acpu", "acpu Ge/s", "apple", "ratio"
+        "  {:<16} {:>8} {:>8}   {:>6}",
+        "operation", "acpu_ns", "apple_ns", "ratio"
     );
-    eprintln!("  {}", "─".repeat(62));
+    eprintln!("  {}", "─".repeat(44));
 
     // ---- VECTOR MATH ----
     eprintln!("\n  VECTOR MATH");
@@ -395,12 +376,9 @@ fn main() {
     }
 
     // ---- AMX RAW ----
-    eprintln!("\n  AMX RAW (per instruction)");
-    eprintln!(
-        "  {:<20} {:>7} {:>10}",
-        "instruction", "ns/op", "peak GFLOPS"
-    );
-    eprintln!("  {}", "─".repeat(40));
+    eprintln!("\n  AMX RAW");
+    eprintln!("  {:<16} {:>8} {:>8}", "instruction", "ns/op", "GFLOPS");
+    eprintln!("  {}", "─".repeat(34));
     {
         let ta = [1f32; 256];
         let tb = [1f32; 256];
@@ -427,9 +405,9 @@ fn main() {
                 let n = med(&mut t);
                 let npo = n as f64 / ops as f64;
                 if $fl > 0 {
-                    eprintln!("  {:<20} {:>7.1} {:>10.0}", $nm, npo, $fl as f64 / npo);
+                    eprintln!("  {:<16} {:>8.1} {:>8.0}", $nm, npo, $fl as f64 / npo);
                 } else {
-                    eprintln!("  {:<20} {:>7.1}", $nm, npo);
+                    eprintln!("  {:<16} {:>8.1}", $nm, npo);
                 }
             };
         }
@@ -451,25 +429,25 @@ fn main() {
     }
 
     // ---- SYNC ----
-    eprintln!("\n  SYNC PRIMITIVES");
-    eprintln!("  {:<20} {:>7}", "primitive", "ns/op");
-    eprintln!("  {}", "─".repeat(30));
+    eprintln!("\n  SYNC");
+    eprintln!("  {:<16} {:>8}", "primitive", "ns/op");
+    eprintln!("  {}", "─".repeat(26));
     eprintln!(
-        "  {:<20} {:>7}",
+        "  {:<16} {:>8}",
         "DMB ISH",
         ns(|| unsafe {
             acpu::sync::dmb_ish();
         })
     );
     eprintln!(
-        "  {:<20} {:>7}",
+        "  {:<16} {:>8}",
         "DSB ISH",
         ns(|| unsafe {
             acpu::sync::dsb_ish();
         })
     );
     eprintln!(
-        "  {:<20} {:>7}",
+        "  {:<16} {:>8}",
         "ISB",
         ns(|| unsafe {
             acpu::sync::isb();
@@ -477,16 +455,20 @@ fn main() {
     );
 
     // ---- MEMORY ----
-    eprintln!("\n  MEMORY BANDWIDTH (NEON sum)");
-    eprintln!("  {:<20} {:>7} {:>10}", "level", "ns", "GB/s");
-    eprintln!("  {}", "─".repeat(40));
+    eprintln!("\n  MEMORY BANDWIDTH");
+    eprintln!("  {:<16} {:>8} {:>8}", "level", "ns", "GB/s");
+    eprintln!("  {}", "─".repeat(34));
     for &(sz, label) in &[(4096, "L1 16KB"), (65536, "L2 256KB"), (1048576, "L3 4MB")] {
         let data: Vec<f32> = vec![1.0; sz];
         let t = ns(|| {
             std::hint::black_box(acpu::vector::reduce::sum(&data));
         });
-        let gbs = sz as f64 * 4.0 / t as f64;
-        eprintln!("  {:<20} {:>7} {:>10.1}", label, t, gbs);
+        eprintln!(
+            "  {:<16} {:>8} {:>8.1}",
+            label,
+            t,
+            sz as f64 * 4.0 / t as f64
+        );
     }
 
     eprintln!("\n=== done ===");
