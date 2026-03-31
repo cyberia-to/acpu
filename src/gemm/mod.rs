@@ -149,7 +149,7 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
             let p_cores = crate::probe::detect().p_cores as usize;
             let max_threads = if m >= MR { m / MR } else { 1 };
             let n_threads = p_cores.max(1).min(max_threads);
-            if n_threads > 1 && flops > 1_000_000_000 {
+            if n_threads > 1 && flops > 200_000_000 {
                 sgemm_parallel(a, b, c, m, n, k, n_threads);
             } else {
                 sgemm_amx_single(a, b, c, m, n, k);
