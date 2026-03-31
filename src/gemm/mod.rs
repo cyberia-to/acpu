@@ -135,8 +135,9 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
     #[cfg(target_arch = "aarch64")]
     {
         let flops = 2 * m * n * k;
-        // Tiny matrices (no full tile): NEON, skip AMX entirely.
-        if m < MR || n < NR {
+        // Small matrices where AMX tile utilization is poor: NEON is faster.
+        // AMX needs full 16×16 tiles; sizes < 32 waste >50% on scalar edges.
+        if m < 2 * MR || n < 2 * NR {
             sgemm_neon(a, b, c, m, n, k);
             return;
         }
@@ -588,6 +589,7 @@ pub(super) fn gebp_kernel(
     }
 }
 
+/// NEON-accelerated edge kernel for partial tiles.
 #[allow(clippy::too_many_arguments)]
 fn edge_kernel(
     a_pack: &[f32],
@@ -604,15 +606,46 @@ fn edge_kernel(
 ) {
     let ir = ir_strip * MR;
     let jr = jr_strip * NR;
-    for i in 0..mr {
-        for j in 0..nr {
-            let mut acc = 0.0f32;
-            for p in 0..kc {
-                let av = a_pack[ir_strip * kc * MR + p * MR + i];
-                let bv = b_pack[jr_strip * kc * NR + p * NR + j];
-                acc += av * bv;
+    let a_base = ir_strip * kc * MR;
+    let b_base = jr_strip * kc * NR;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::*;
+        unsafe {
+            for i in 0..mr {
+                let mut j = 0;
+                while j + 4 <= nr {
+                    let mut acc = vld1q_f32(c.as_ptr().add((ic + ir + i) * n + jc + jr + j));
+                    for p in 0..kc {
+                        let av = vdupq_n_f32(*a_pack.get_unchecked(a_base + p * MR + i));
+                        let bv = vld1q_f32(b_pack.as_ptr().add(b_base + p * NR + j));
+                        acc = vfmaq_f32(acc, av, bv);
+                    }
+                    vst1q_f32(c.as_mut_ptr().add((ic + ir + i) * n + jc + jr + j), acc);
+                    j += 4;
+                }
+                while j < nr {
+                    let mut acc = c[(ic + ir + i) * n + jc + jr + j];
+                    for p in 0..kc {
+                        acc += a_pack[a_base + p * MR + i] * b_pack[b_base + p * NR + j];
+                    }
+                    c[(ic + ir + i) * n + jc + jr + j] = acc;
+                    j += 1;
+                }
             }
-            c[(ic + ir + i) * n + jc + jr + j] += acc;
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for i in 0..mr {
+            for j in 0..nr {
+                let mut acc = 0.0f32;
+                for p in 0..kc {
+                    acc += a_pack[a_base + p * MR + i] * b_pack[b_base + p * NR + j];
+                }
+                c[(ic + ir + i) * n + jc + jr + j] += acc;
+            }
         }
     }
 }
@@ -621,19 +654,54 @@ fn edge_kernel(
 // Fallbacks
 // ---------------------------------------------------------------------------
 
-/// NEON sgemm for tiny matrices (m < MR or n < NR). No AMX.
+/// NEON sgemm for small matrices. 4-row blocking: one B load serves 4 A rows.
 #[cfg(target_arch = "aarch64")]
 fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     use core::arch::aarch64::*;
     unsafe {
-        for i in 0..m {
+        let mut i = 0;
+        // 4-row block: load B[p, j..j+4] once, FMA into 4 rows of C.
+        while i + 4 <= m {
+            let mut j = 0;
+            while j + 4 <= n {
+                let mut c0 = vld1q_f32(c.as_ptr().add(i * n + j));
+                let mut c1 = vld1q_f32(c.as_ptr().add((i + 1) * n + j));
+                let mut c2 = vld1q_f32(c.as_ptr().add((i + 2) * n + j));
+                let mut c3 = vld1q_f32(c.as_ptr().add((i + 3) * n + j));
+                for p in 0..k {
+                    let bv = vld1q_f32(b.as_ptr().add(p * n + j));
+                    c0 = vfmaq_f32(c0, vdupq_n_f32(*a.get_unchecked(i * k + p)), bv);
+                    c1 = vfmaq_f32(c1, vdupq_n_f32(*a.get_unchecked((i + 1) * k + p)), bv);
+                    c2 = vfmaq_f32(c2, vdupq_n_f32(*a.get_unchecked((i + 2) * k + p)), bv);
+                    c3 = vfmaq_f32(c3, vdupq_n_f32(*a.get_unchecked((i + 3) * k + p)), bv);
+                }
+                vst1q_f32(c.as_mut_ptr().add(i * n + j), c0);
+                vst1q_f32(c.as_mut_ptr().add((i + 1) * n + j), c1);
+                vst1q_f32(c.as_mut_ptr().add((i + 2) * n + j), c2);
+                vst1q_f32(c.as_mut_ptr().add((i + 3) * n + j), c3);
+                j += 4;
+            }
+            // Scalar tail columns.
+            while j < n {
+                for ii in 0..4 {
+                    let mut acc = *c.get_unchecked((i + ii) * n + j);
+                    for p in 0..k {
+                        acc += a.get_unchecked((i + ii) * k + p) * b.get_unchecked(p * n + j);
+                    }
+                    *c.get_unchecked_mut((i + ii) * n + j) = acc;
+                }
+                j += 1;
+            }
+            i += 4;
+        }
+        // Remaining rows: 1 at a time with NEON.
+        while i < m {
             let mut j = 0;
             while j + 4 <= n {
                 let mut acc = vld1q_f32(c.as_ptr().add(i * n + j));
                 for p in 0..k {
                     let a_val = vdupq_n_f32(*a.get_unchecked(i * k + p));
-                    let b_vec = vld1q_f32(b.as_ptr().add(p * n + j));
-                    acc = vfmaq_f32(acc, a_val, b_vec);
+                    acc = vfmaq_f32(acc, a_val, vld1q_f32(b.as_ptr().add(p * n + j)));
                 }
                 vst1q_f32(c.as_mut_ptr().add(i * n + j), acc);
                 j += 4;
@@ -646,6 +714,7 @@ fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize)
                 *c.get_unchecked_mut(i * n + j) = acc;
                 j += 1;
             }
+            i += 1;
         }
     }
 }
