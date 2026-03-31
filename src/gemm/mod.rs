@@ -13,6 +13,8 @@ pub use other::{bgemm, hgemm, qgemm};
 
 use crate::matrix;
 
+use std::cell::RefCell;
+
 // ---------------------------------------------------------------------------
 // GEBP blocking parameters (tuned for Apple Silicon L1/L2)
 // ---------------------------------------------------------------------------
@@ -20,6 +22,29 @@ use crate::matrix;
 const MR: usize = 16;
 const NR: usize = 16;
 pub(super) const MC: usize = 64;
+
+// ---------------------------------------------------------------------------
+// Thread-local pack buffer cache — keep buffers warm across sgemm calls
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static PACK_CACHE: RefCell<PackCache> = const { RefCell::new(PackCache { a: None, b: None }) };
+}
+
+struct PackCache {
+    a: Option<AlignedBuf>,
+    b: Option<AlignedBuf>,
+}
+
+/// Get or grow a cached pack buffer. Returns a warm buffer (in L1/L2).
+fn cached_buf(slot: &mut Option<AlignedBuf>, needed: usize) -> AlignedBuf {
+    if let Some(buf) = slot.take() {
+        if buf.len >= needed {
+            return buf;
+        }
+    }
+    AlignedBuf::new(needed)
+}
 
 // ---------------------------------------------------------------------------
 // Aligned allocation
@@ -38,8 +63,15 @@ impl AlignedBuf {
                 len: 0,
             };
         }
-        let layout = std::alloc::Layout::from_size_align(n * 4, 64).unwrap();
-        let ptr = unsafe { std::alloc::alloc_zeroed(layout) as *mut f32 };
+        let size = n * 4;
+        let layout = std::alloc::Layout::from_size_align(size, 64).unwrap();
+        // Small buffers: skip zero-fill. Packing writes before reading.
+        // Large buffers: zero-fill to pre-fault mmap'd pages.
+        let ptr = if size <= 128 * 1024 {
+            unsafe { std::alloc::alloc(layout) as *mut f32 }
+        } else {
+            unsafe { std::alloc::alloc_zeroed(layout) as *mut f32 }
+        };
         assert!(!ptr.is_null(), "aligned allocation failed");
         Self { ptr, len: n }
     }
@@ -164,8 +196,16 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
     let mc_max = m.min(if m > 128 { 256 } else { MC }); // MC=256 → A panel in L2
     let nc_max = n.min(if n > 256 { 512 } else { 256 });
     // Packing works in MR/NR-wide strips, so round up allocation.
-    let mut a_pack = AlignedBuf::new(mc_max.div_ceil(MR) * MR * kc_max);
-    let mut b_pack = AlignedBuf::new(kc_max * nc_max.div_ceil(NR) * NR);
+    let a_need = mc_max.div_ceil(MR) * MR * kc_max;
+    let b_need = kc_max * nc_max.div_ceil(NR) * NR;
+
+    // Thread-local cache: reuse warm buffers across calls.
+    let (mut a_pack, mut b_pack) = PACK_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        let a = cached_buf(&mut cache.a, a_need);
+        let b = cached_buf(&mut cache.b, b_need);
+        (a, b)
+    });
 
     // Goto BLAS loop order: pack A once per (pc, ic), reuse across all jc.
     // A stays in L2 while B panels stream through.
@@ -202,6 +242,13 @@ fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: 
     }
 
     drop(ctx);
+
+    // Return buffers to thread-local cache for reuse.
+    PACK_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        cache.a = Some(a_pack);
+        cache.b = Some(b_pack);
+    });
 }
 
 // ---------------------------------------------------------------------------
