@@ -80,7 +80,7 @@ impl AlignedBuf {
             };
         }
         let size = n * 4;
-        let layout = std::alloc::Layout::from_size_align(size, 64).unwrap();
+        let layout = std::alloc::Layout::from_size_align(size, 128).unwrap();
         // Small buffers: skip zero-fill. Packing writes before reading.
         // Large buffers: zero-fill to pre-fault mmap'd pages.
         let ptr = if size <= 128 * 1024 {

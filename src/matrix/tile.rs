@@ -646,64 +646,46 @@ pub unsafe fn accumulate_tile_16x16(c: *mut f32, ldc: usize) {
 // 32×32 microkernel — 2×2 tile layout, accumulate-only
 // ---------------------------------------------------------------------------
 
-/// AMX 32×32 microkernel using 2×2 Z tile layout.
+/// AMX 32×32 pair-load microkernel (reverse-engineered from Accelerate).
 ///
-/// Z tiles: 0 = rows[0:16]×cols[0:16], 1 = rows[0:16]×cols[16:32],
-///          2 = rows[16:32]×cols[0:16], 3 = rows[16:32]×cols[16:32].
+/// 2×2 Z tile layout. AMX pair loads (bit 62): 128 bytes → 2 registers.
+/// **6 ops per k-step**: 1 LDX(pair) + 1 LDY(pair) + 4 FMA.
 ///
-/// Per k step: 2 LDY + 2 LDX + 4 FMA = 8 ops for 2048 FLOPS (50% FMA).
-/// Compare to 16×64: 18 ops for 4096 FLOPS (44% FMA).
-///
-/// `a0`/`a1`: two packed 16-wide A strips (MR×k each, 64-byte stride).
-/// `b0`/`b1`: two B column panels (16 wide each, `bs`-byte stride).
+/// `a_pair`: interleaved A pack — for column p: strip0[p] at offset p*128,
+///   strip1[p] at p*128+64. Must be 128-byte aligned.
+/// `b0`: B row-major (columns 0:32 contiguous). Must be 64-byte aligned.
+///   Pair LDX loads cols 0:16 → X[0], cols 16:32 → X[1].
+/// `bs`: B row stride in bytes.
 ///
 /// # Safety
-/// AMX active. Z tiles preloaded. A panels: 64-byte stride. B: `bs` stride.
+/// AMX active. Z tiles preloaded. Data must be properly aligned.
 #[inline]
 pub unsafe fn microkernel_32x32_acc(
-    a0: *const u8,
-    a1: *const u8,
+    a_pair: *const u8,
+    _a1: *const u8,
     b0: *const u8,
-    b1: *const u8,
+    _b1: *const u8,
     k: usize,
     bs: usize,
 ) {
+    const PAIR: u64 = 1u64 << 62;
+
+    let f00 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+    let f10 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+    let f01 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(1), 2);
+    let f11 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(1), 3);
+
+    // 7 AMX ops per k-step: pair LDY for A (aligned), individual LDX for B (user data).
+    // B may not be 128-byte aligned, so no pair LDX.
     let mut p = 0usize;
-
-    while p + 2 <= k {
-        // k-step p: load Y[0]=A0[p], Y[1]=A1[p], X[0]=B0[p], X[1]=B1[p]
-        amx_op::<OP_LDY>(a0.add(p * 64) as u64);
-        amx_op::<OP_LDY>((a1.add(p * 64) as u64) | (1u64 << 56));
+    while p < k {
+        amx_op::<OP_LDY>((a_pair.add(p * 128) as u64) | PAIR);
         amx_op::<OP_LDX>(b0.add(p * bs) as u64);
-        amx_op::<OP_LDX>((b1.add(p * bs) as u64) | (1u64 << 56));
-        // FMA: Z[0] += X[0]⊗Y[0], Z[1] += X[1]⊗Y[0],
-        //       Z[2] += X[0]⊗Y[1], Z[3] += X[1]⊗Y[1]
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(1), 2));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(1), 3));
-
-        // k-step p+1: load into Y[2..3], X[2..3]
-        amx_op::<OP_LDY>((a0.add((p + 1) * 64) as u64) | (2u64 << 56));
-        amx_op::<OP_LDY>((a1.add((p + 1) * 64) as u64) | (3u64 << 56));
-        amx_op::<OP_LDX>((b0.add((p + 1) * bs) as u64) | (2u64 << 56));
-        amx_op::<OP_LDX>((b1.add((p + 1) * bs) as u64) | (3u64 << 56));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(2), 0));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(2), 1));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(2), YRow::new_unchecked(3), 2));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(3), YRow::new_unchecked(3), 3));
-
-        p += 2;
-    }
-
-    if p < k {
-        amx_op::<OP_LDY>(a0.add(p * 64) as u64);
-        amx_op::<OP_LDY>((a1.add(p * 64) as u64) | (1u64 << 56));
-        amx_op::<OP_LDX>(b0.add(p * bs) as u64);
-        amx_op::<OP_LDX>((b1.add(p * bs) as u64) | (1u64 << 56));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(1), 2));
-        amx_op::<OP_FMA32>(fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(1), 3));
+        amx_op::<OP_LDX>((b0.add(p * bs + 64) as u64) | (1u64 << 56));
+        amx_op::<OP_FMA32>(f00);
+        amx_op::<OP_FMA32>(f10);
+        amx_op::<OP_FMA32>(f01);
+        amx_op::<OP_FMA32>(f11);
+        p += 1;
     }
 }
