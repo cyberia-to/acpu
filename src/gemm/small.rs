@@ -94,7 +94,13 @@ fn sgemm_pair32(
 /// NEON-accelerated interleaved A pack for 2 strips (32 rows).
 /// Output stride = 32 floats (128 bytes) per k column for pair LDY.
 #[cfg(target_arch = "aarch64")]
-fn pack_a_interleaved_neon(a: &[f32], lda: usize, row_start: usize, kc: usize, dst: &mut [f32]) {
+pub(super) fn pack_a_interleaved_neon(
+    a: &[f32],
+    lda: usize,
+    row_start: usize,
+    kc: usize,
+    dst: &mut [f32],
+) {
     use core::arch::aarch64::*;
 
     let mut rows = [0usize; 32];

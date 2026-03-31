@@ -519,18 +519,86 @@ pub(super) fn gebp_kernel(
     let n_mr = mc.div_ceil(MR);
     let n_nr = nc.div_ceil(NR);
 
-    for ir_strip in 0..n_mr {
+    let b_base = b_pack.as_ptr();
+
+    // 32×32 pair-load dispatch: process 2 A strips × 2 B strips.
+    // Pair LDY loads interleaved A (2 strips in 128 bytes).
+    // B strips in GEBP pack are NOT contiguous → individual LDX.
+    // 7 ops/k-step vs 9 in 16×64 = 22% fewer AMX instructions.
+    let mut ir_strip = 0;
+    while ir_strip + 2 <= n_mr {
+        let ir = ir_strip * MR;
+        let mr0 = MR.min(mc - ir);
+        let mr1 = MR.min(mc - ir - MR);
+        if mr0 != MR || mr1 != MR {
+            break; // Need full tiles for pair kernel.
+        }
+
+        let a0 = unsafe { a_pack.as_ptr().add(ir_strip * kc * MR) as *const u8 };
+        let a1 = unsafe { a_pack.as_ptr().add((ir_strip + 1) * kc * MR) as *const u8 };
+
+        let mut jr_strip = 0;
+        // Process 2 B strips at a time with 32×32 kernel.
+        while jr_strip + 2 <= n_nr && nc - jr_strip * NR >= 2 * NR {
+            let jr = jr_strip * NR;
+            unsafe {
+                let bp0 = b_base.add(jr_strip * kc * NR) as *const u8;
+                let bp1 = b_base.add((jr_strip + 1) * kc * NR) as *const u8;
+                let c0 = c.as_mut_ptr().add((ic + ir) * n + jc + jr);
+                matrix::tile::preload_c(c0, n, 0);
+                matrix::tile::preload_c(c0.add(NR), n, 1);
+                matrix::tile::preload_c(c0.add(MR * n), n, 2);
+                matrix::tile::preload_c(c0.add(MR * n + NR), n, 3);
+                matrix::tile::microkernel_32x32_gebp(a0, a1, bp0, bp1, kc);
+                matrix::tile::store_c(c0, n, 0);
+                matrix::tile::store_c(c0.add(NR), n, 1);
+                matrix::tile::store_c(c0.add(MR * n), n, 2);
+                matrix::tile::store_c(c0.add(MR * n + NR), n, 3);
+            }
+            jr_strip += 2;
+        }
+        // Remaining odd B strip: 16×16 per A strip.
+        while jr_strip < n_nr {
+            let jr = jr_strip * NR;
+            let nr_actual = NR.min(nc - jr);
+            for s in 0..2usize {
+                let a_ptr = if s == 0 { a0 } else { a1 };
+                if nr_actual == NR {
+                    unsafe {
+                        let bp = b_base.add(jr_strip * kc * NR) as *const u8;
+                        let cp = c.as_mut_ptr().add((ic + ir + s * MR) * n + jc + jr);
+                        matrix::tile::preload_c(cp, n, 0);
+                        matrix::tile::microkernel_16x16_acc(a_ptr, bp, kc, 64);
+                        matrix::tile::store_c(cp, n, 0);
+                    }
+                } else {
+                    edge_kernel(
+                        a_pack,
+                        b_pack,
+                        c,
+                        n,
+                        ic,
+                        jc,
+                        ir_strip + s,
+                        jr_strip,
+                        MR,
+                        nr_actual,
+                        kc,
+                    );
+                }
+            }
+            jr_strip += 1;
+        }
+        ir_strip += 2;
+    }
+
+    // Remaining odd A strip: 16×64 / 16×32 / 16×16 cascade.
+    while ir_strip < n_mr {
         let ir = ir_strip * MR;
         let mr_actual = MR.min(mc - ir);
         let a_ptr = unsafe { a_pack.as_ptr().add(ir_strip * kc * MR) as *const u8 };
-
         let mut jr_strip = 0;
-        let b_base = b_pack.as_ptr();
 
-        // Cascade: 16×64 (4 tiles) → 16×32 (2 tiles) → 16×16 (1 tile).
-        // Preload C → AMX compute → store C directly (no AMX→CPU sync).
-
-        // Quad-wide: process 4 B strips at once.
         while jr_strip + 4 <= n_nr && mr_actual == MR && nc - jr_strip * NR >= 4 * NR {
             let jr = jr_strip * NR;
             unsafe {
@@ -549,8 +617,6 @@ pub(super) fn gebp_kernel(
             }
             jr_strip += 4;
         }
-
-        // Double-wide: process 2 B strips.
         while jr_strip + 2 <= n_nr && mr_actual == MR && nc - jr_strip * NR >= 2 * NR {
             let jr = jr_strip * NR;
             unsafe {
@@ -566,8 +632,6 @@ pub(super) fn gebp_kernel(
             }
             jr_strip += 2;
         }
-
-        // Single tiles (including edge cases).
         while jr_strip < n_nr {
             let jr = jr_strip * NR;
             let nr_actual = NR.min(nc - jr);
@@ -586,6 +650,7 @@ pub(super) fn gebp_kernel(
             }
             jr_strip += 1;
         }
+        ir_strip += 1;
     }
 }
 

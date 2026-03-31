@@ -672,7 +672,43 @@ pub unsafe fn accumulate_tile_16x16(c: *mut f32, ldc: usize) {
 }
 
 // ---------------------------------------------------------------------------
-// 32×32 microkernel — 2×2 tile layout, accumulate-only
+// 32×32 GEBP microkernel — individual loads, packed B (stride=64)
+// ---------------------------------------------------------------------------
+
+/// AMX 32×32 for GEBP path. Individual LDY + LDX (no pair load).
+/// 2 LDY + 2 LDX + 4 FMA = 8 ops/k-step (vs 9 in 16×64).
+///
+/// # Safety
+/// AMX active. Z tiles preloaded. A: 64-byte stride. B: 64-byte stride (packed).
+#[inline]
+pub unsafe fn microkernel_32x32_gebp(
+    a0: *const u8,
+    a1: *const u8,
+    b0: *const u8,
+    b1: *const u8,
+    k: usize,
+) {
+    let f00 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+    let f10 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(0), 1);
+    let f01 = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(1), 2);
+    let f11 = fma_acc(XRow::new_unchecked(1), YRow::new_unchecked(1), 3);
+
+    let mut p = 0usize;
+    while p < k {
+        amx_op::<OP_LDY>(a0.add(p * 64) as u64);
+        amx_op::<OP_LDY>((a1.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_LDX>(b0.add(p * 64) as u64);
+        amx_op::<OP_LDX>((b1.add(p * 64) as u64) | (1u64 << 56));
+        amx_op::<OP_FMA32>(f00);
+        amx_op::<OP_FMA32>(f10);
+        amx_op::<OP_FMA32>(f01);
+        amx_op::<OP_FMA32>(f11);
+        p += 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 32×32 microkernel — pair-load, accumulate-only (for small path)
 // ---------------------------------------------------------------------------
 
 /// AMX 32×32 pair-load microkernel (reverse-engineered from Accelerate).
