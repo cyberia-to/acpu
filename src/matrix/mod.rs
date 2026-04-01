@@ -13,6 +13,7 @@ pub mod fma;
 pub mod ops;
 pub mod regs;
 pub mod tile;
+pub mod tile_f16;
 
 pub use regs::{XRow, YRow, ZRow, ALL_X, ALL_Y, ALL_Z};
 
