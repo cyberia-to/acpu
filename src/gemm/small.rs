@@ -31,7 +31,7 @@ fn sgemm_pair32(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],
-    m: usize,
+    _m: usize,
     n: usize,
     k: usize,
     n_mr: usize,

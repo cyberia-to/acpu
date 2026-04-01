@@ -207,9 +207,22 @@ fn main() {
         );
 
         // scale: c = s*a  (read a + write c = 2×bytes)
-        let t = ns(|| {
-            for (c, a) in c_arr.iter_mut().zip(a_arr.iter()) {
-                *c = scalar * a;
+        let t = ns(|| unsafe {
+            use core::arch::aarch64::*;
+            let sv = vdupq_n_f32(scalar);
+            let pa = a_arr.as_ptr();
+            let pc = c_arr.as_mut_ptr();
+            let mut i = 0;
+            while i + 16 <= sn {
+                let a0 = vld1q_f32(pa.add(i));
+                let a1 = vld1q_f32(pa.add(i + 4));
+                let a2 = vld1q_f32(pa.add(i + 8));
+                let a3 = vld1q_f32(pa.add(i + 12));
+                vst1q_f32(pc.add(i), vmulq_f32(sv, a0));
+                vst1q_f32(pc.add(i + 4), vmulq_f32(sv, a1));
+                vst1q_f32(pc.add(i + 8), vmulq_f32(sv, a2));
+                vst1q_f32(pc.add(i + 12), vmulq_f32(sv, a3));
+                i += 16;
             }
             std::hint::black_box(&c_arr);
         });
@@ -221,9 +234,26 @@ fn main() {
         );
 
         // add: c = a+b  (read a,b + write c = 3×bytes)
-        let t = ns(|| {
-            for ((c, a), b) in c_arr.iter_mut().zip(a_arr.iter()).zip(b_arr.iter()) {
-                *c = a + b;
+        let t = ns(|| unsafe {
+            use core::arch::aarch64::*;
+            let pa = a_arr.as_ptr();
+            let pb = b_arr.as_ptr();
+            let pc = c_arr.as_mut_ptr();
+            let mut i = 0;
+            while i + 16 <= sn {
+                let a0 = vld1q_f32(pa.add(i));
+                let a1 = vld1q_f32(pa.add(i + 4));
+                let a2 = vld1q_f32(pa.add(i + 8));
+                let a3 = vld1q_f32(pa.add(i + 12));
+                let b0 = vld1q_f32(pb.add(i));
+                let b1 = vld1q_f32(pb.add(i + 4));
+                let b2 = vld1q_f32(pb.add(i + 8));
+                let b3 = vld1q_f32(pb.add(i + 12));
+                vst1q_f32(pc.add(i), vaddq_f32(a0, b0));
+                vst1q_f32(pc.add(i + 4), vaddq_f32(a1, b1));
+                vst1q_f32(pc.add(i + 8), vaddq_f32(a2, b2));
+                vst1q_f32(pc.add(i + 12), vaddq_f32(a3, b3));
+                i += 16;
             }
             std::hint::black_box(&c_arr);
         });
@@ -235,9 +265,27 @@ fn main() {
         );
 
         // triad: d = a + s*b  (read a,b + write d = 3×bytes)
-        let t = ns(|| {
-            for ((d, a), b) in d_arr.iter_mut().zip(a_arr.iter()).zip(b_arr.iter()) {
-                *d = a + scalar * b;
+        let t = ns(|| unsafe {
+            use core::arch::aarch64::*;
+            let sv = vdupq_n_f32(scalar);
+            let pa = a_arr.as_ptr();
+            let pb = b_arr.as_ptr();
+            let pd = d_arr.as_mut_ptr();
+            let mut i = 0;
+            while i + 16 <= sn {
+                let a0 = vld1q_f32(pa.add(i));
+                let a1 = vld1q_f32(pa.add(i + 4));
+                let a2 = vld1q_f32(pa.add(i + 8));
+                let a3 = vld1q_f32(pa.add(i + 12));
+                let b0 = vld1q_f32(pb.add(i));
+                let b1 = vld1q_f32(pb.add(i + 4));
+                let b2 = vld1q_f32(pb.add(i + 8));
+                let b3 = vld1q_f32(pb.add(i + 12));
+                vst1q_f32(pd.add(i), vfmaq_f32(a0, sv, b0));
+                vst1q_f32(pd.add(i + 4), vfmaq_f32(a1, sv, b1));
+                vst1q_f32(pd.add(i + 8), vfmaq_f32(a2, sv, b2));
+                vst1q_f32(pd.add(i + 12), vfmaq_f32(a3, sv, b3));
+                i += 16;
             }
             std::hint::black_box(&d_arr);
         });
@@ -311,21 +359,22 @@ fn main() {
     );
     eprintln!("  {}", "─".repeat(50));
     {
-        let bench_src: Vec<f32> = (0..4096).map(|i| (i % 100) as f32 * 0.01 - 0.5).collect();
+        // workloads defined with their own data inside
+        // Use heavy workloads so QoS scheduling has time to place thread on correct core
         let workloads: Vec<(&str, Arc<dyn Fn() + Send + Sync>)> = vec![
             (
-                "sum 4096",
+                "sum 1M",
                 Arc::new({
-                    let s = bench_src.clone();
+                    let s: Vec<f32> = vec![1.0; 1024 * 1024];
                     move || {
                         std::hint::black_box(acpu::vector::reduce::sum(&s));
                     }
                 }),
             ),
             (
-                "exp 4096",
+                "exp 64K",
                 Arc::new({
-                    let s = bench_src.clone();
+                    let s: Vec<f32> = (0..65536).map(|i| (i % 100) as f32 * 0.01).collect();
                     move || {
                         let mut b = s.clone();
                         acpu::vector::math::exp(&mut b);
@@ -334,14 +383,16 @@ fn main() {
                 }),
             ),
             (
-                "sgemm 128",
-                Arc::new(|| {
-                    let sz = 128;
+                "sgemm 256",
+                Arc::new({
+                    let sz = 256;
                     let a: Vec<f32> = (0..sz * sz).map(|i| (i % 7) as f32 * 0.1).collect();
                     let b: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
-                    let mut c = vec![0f32; sz * sz];
-                    acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
-                    std::hint::black_box(&c);
+                    move || {
+                        let mut c = vec![0f32; sz * sz];
+                        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+                        std::hint::black_box(&c);
+                    }
                 }),
             ),
         ];
@@ -349,14 +400,14 @@ fn main() {
         for (name, work) in &workloads {
             let w1 = work.clone();
             let w2 = work.clone();
-            let reps = 200; // enough iterations for QoS to settle
+            let reps = 100;
 
             let p_ns = std::thread::spawn(move || {
                 let _ = acpu::sync::affinity::pin_p_core();
-                std::thread::sleep(std::time::Duration::from_millis(5)); // let QoS settle
-                for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                for _ in 0..30 {
                     w1();
-                } // warmup
+                }
                 let mut t = Vec::with_capacity(reps);
                 for _ in 0..reps {
                     let s = Instant::now();
@@ -370,8 +421,8 @@ fn main() {
 
             let e_ns = std::thread::spawn(move || {
                 let _ = acpu::sync::affinity::pin_e_core();
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                for _ in 0..30 {
                     w2();
                 }
                 let mut t = Vec::with_capacity(reps);
