@@ -141,15 +141,16 @@ pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: us
             matmul_f32_neon(a, b, c, m, n, k);
             return;
         }
-        // Small matrices: direct AMX, no B packing (stride LDX).
-        // B fits in L1 when n*k*4 ≤ 128KB.
+        // Direct AMX (no B packing) when B fits in L1 (128KB).
+        // Avoids packing overhead for sizes up to ~180×180.
         if n * k <= 32768 {
             small::matmul_f32_amx_direct(a, b, c, m, n, k);
         } else {
             let p_cores = crate::probe::scan().p_cores as usize;
             let max_threads = if m >= MR { m / MR } else { 1 };
             let n_threads = p_cores.max(1).min(max_threads);
-            if n_threads > 1 && flops > 200_000_000 {
+            // Parallel when flops justify thread spawn overhead
+            if n_threads > 1 && flops > 50_000_000 {
                 matmul_f32_parallel(a, b, c, m, n, k, n_threads);
             } else {
                 matmul_f32_amx_single(a, b, c, m, n, k);
