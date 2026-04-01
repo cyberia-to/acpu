@@ -9,55 +9,96 @@ use super::math;
 use super::reduce;
 
 /// In-place softmax: x_i = exp(x_i - max) / sum(exp(x - max))
+///
+/// Fused 2-pass: (1) sub_max + exp + accumulate sum, (2) divide by sum.
+/// 16-wide unroll on both passes.
 pub fn softmax(x: &mut [f32]) {
     if x.is_empty() {
         return;
     }
 
-    // 1. find max
+    let len = x.len();
     let m = reduce::max(x);
 
-    // 2. subtract max (NEON vectorized)
-    let len = x.len();
+    // Pass 1: x[i] = exp(x[i] - max), accumulate sum simultaneously
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
-    {
+    let sum = {
         unsafe {
             let mv = vdupq_n_f32(m);
+            let mut s0 = vdupq_n_f32(0.0);
+            let mut s1 = vdupq_n_f32(0.0);
+            let mut s2 = vdupq_n_f32(0.0);
+            let mut s3 = vdupq_n_f32(0.0);
+            while i + 16 <= len {
+                let p = x.as_mut_ptr().add(i);
+                let e0 = math::exp_neon(vsubq_f32(vld1q_f32(p), mv));
+                let e1 = math::exp_neon(vsubq_f32(vld1q_f32(p.add(4)), mv));
+                let e2 = math::exp_neon(vsubq_f32(vld1q_f32(p.add(8)), mv));
+                let e3 = math::exp_neon(vsubq_f32(vld1q_f32(p.add(12)), mv));
+                vst1q_f32(p, e0);
+                vst1q_f32(p.add(4), e1);
+                vst1q_f32(p.add(8), e2);
+                vst1q_f32(p.add(12), e3);
+                s0 = vaddq_f32(s0, e0);
+                s1 = vaddq_f32(s1, e1);
+                s2 = vaddq_f32(s2, e2);
+                s3 = vaddq_f32(s3, e3);
+                i += 16;
+            }
             while i + 4 <= len {
-                let v = vld1q_f32(x.as_ptr().add(i));
-                vst1q_f32(x.as_mut_ptr().add(i), vsubq_f32(v, mv));
+                let p = x.as_mut_ptr().add(i);
+                let e = math::exp_neon(vsubq_f32(vld1q_f32(p), mv));
+                vst1q_f32(p, e);
+                s0 = vaddq_f32(s0, e);
                 i += 4;
             }
+            let mut s = vaddvq_f32(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+            while i < len {
+                let e = math::exp_scalar(x[i] - m);
+                x[i] = e;
+                s += e;
+                i += 1;
+            }
+            s
         }
-    }
+    };
 
-    while i < len {
-        x[i] -= m;
-        i += 1;
-    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let sum = {
+        let mut s = 0.0f32;
+        for v in x.iter_mut() {
+            let e = math::exp_scalar(*v - m);
+            *v = e;
+            s += e;
+        }
+        s
+    };
 
-    // 3. exp in-place
-    math::exp(x);
-
-    // 4. sum
-    let s = reduce::sum(x);
-
-    // 5. divide by sum
-    if s == 0.0 {
+    if sum == 0.0 {
         return;
     }
-    let inv_s = 1.0 / s;
+
+    // Pass 2: divide by sum — 16-wide
+    let inv_s = 1.0 / sum;
     i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
             let inv_v = vdupq_n_f32(inv_s);
+            while i + 16 <= len {
+                let p = x.as_mut_ptr().add(i);
+                vst1q_f32(p, vmulq_f32(vld1q_f32(p), inv_v));
+                vst1q_f32(p.add(4), vmulq_f32(vld1q_f32(p.add(4)), inv_v));
+                vst1q_f32(p.add(8), vmulq_f32(vld1q_f32(p.add(8)), inv_v));
+                vst1q_f32(p.add(12), vmulq_f32(vld1q_f32(p.add(12)), inv_v));
+                i += 16;
+            }
             while i + 4 <= len {
-                let v = vld1q_f32(x.as_ptr().add(i));
-                vst1q_f32(x.as_mut_ptr().add(i), vmulq_f32(v, inv_v));
+                let p = x.as_mut_ptr().add(i);
+                vst1q_f32(p, vmulq_f32(vld1q_f32(p), inv_v));
                 i += 4;
             }
         }

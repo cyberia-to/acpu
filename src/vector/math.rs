@@ -31,7 +31,7 @@ const GELU_COEFF: f32 = 0.044_715;
 // ---- scalar helpers -------------------------------------------------------
 
 #[inline(always)]
-fn exp_scalar(x: f32) -> f32 {
+pub(crate) fn exp_scalar(x: f32) -> f32 {
     let x = x.clamp(EXP_LO, EXP_HI);
     let n = (x * LN2_INV + 0.5).floor();
     let r = x - n * LN2_HI - n * LN2_LO;
@@ -92,7 +92,7 @@ fn sigmoid_scalar(x: f32) -> f32 {
 
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
-unsafe fn exp_neon(x: float32x4_t) -> float32x4_t {
+pub(crate) unsafe fn exp_neon(x: float32x4_t) -> float32x4_t {
     let lo = vdupq_n_f32(EXP_LO);
     let hi = vdupq_n_f32(EXP_HI);
     let x = vmaxq_f32(vminq_f32(x, hi), lo);
@@ -163,7 +163,7 @@ unsafe fn log_neon(x: float32x4_t) -> float32x4_t {
 
 // ---- public functions -----------------------------------------------------
 
-/// Elementwise e^x in-place.
+/// Elementwise e^x in-place. 8-wide unroll (2 independent exp_neon).
 pub fn exp(x: &mut [f32]) {
     let len = x.len();
     let mut i = 0;
@@ -171,16 +171,22 @@ pub fn exp(x: &mut [f32]) {
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
+            while i + 8 <= len {
+                let p = x.as_mut_ptr().add(i);
+                let r0 = exp_neon(vld1q_f32(p));
+                let r1 = exp_neon(vld1q_f32(p.add(4)));
+                vst1q_f32(p, r0);
+                vst1q_f32(p.add(4), r1);
+                i += 8;
+            }
             while i + 4 <= len {
                 let v = vld1q_f32(x.as_ptr().add(i));
-                let r = exp_neon(v);
-                vst1q_f32(x.as_mut_ptr().add(i), r);
+                vst1q_f32(x.as_mut_ptr().add(i), exp_neon(v));
                 i += 4;
             }
         }
     }
 
-    // scalar tail / fallback
     while i < len {
         x[i] = exp_scalar(x[i]);
         i += 1;
