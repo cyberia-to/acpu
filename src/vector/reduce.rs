@@ -94,7 +94,9 @@ pub fn max(x: &[f32]) -> f32 {
             let mut m = vmaxnmvq_f32(a0);
             while i < len {
                 let v = *p.add(i);
-                if v > m { m = v; }
+                if v > m {
+                    m = v;
+                }
                 i += 1;
             }
             m
@@ -143,7 +145,9 @@ pub fn min(x: &[f32]) -> f32 {
             let mut m = vminnmvq_f32(a0);
             while i < len {
                 let v = *p.add(i);
-                if v < m { m = v; }
+                if v < m {
+                    m = v;
+                }
                 i += 1;
             }
             m

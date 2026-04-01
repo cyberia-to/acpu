@@ -86,7 +86,11 @@ pub unsafe fn microkernel_32x32_f16(a_panel: *const u8, b_panel: *const u8, k: u
             amx_op::<OP_LDY>((a_panel.add((p + i as usize) * 64) as u64) | ((i as u64) << 56));
         }
         if first {
-            amx_op::<OP_FMA16>(fma16_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+            amx_op::<OP_FMA16>(fma16_first(
+                XRow::new_unchecked(0),
+                YRow::new_unchecked(0),
+                0,
+            ));
             first = false;
         } else {
             amx_op::<OP_FMA16>(fma16_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
@@ -102,7 +106,11 @@ pub unsafe fn microkernel_32x32_f16(a_panel: *const u8, b_panel: *const u8, k: u
         amx_op::<OP_LDX>(b_panel.add(p * 64) as u64);
         amx_op::<OP_LDY>(a_panel.add(p * 64) as u64);
         if first {
-            amx_op::<OP_FMA16>(fma16_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));
+            amx_op::<OP_FMA16>(fma16_first(
+                XRow::new_unchecked(0),
+                YRow::new_unchecked(0),
+                0,
+            ));
             first = false;
         } else {
             amx_op::<OP_FMA16>(fma16_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0));

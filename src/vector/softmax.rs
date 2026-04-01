@@ -187,9 +187,18 @@ pub fn normalize(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
                 let w3 = vld1q_f32(weight.as_ptr().add(i + 12));
                 // fused: out = (x * scale) * weight
                 vst1q_f32(out.as_mut_ptr().add(i), vmulq_f32(vmulq_f32(x0, scale), w0));
-                vst1q_f32(out.as_mut_ptr().add(i + 4), vmulq_f32(vmulq_f32(x1, scale), w1));
-                vst1q_f32(out.as_mut_ptr().add(i + 8), vmulq_f32(vmulq_f32(x2, scale), w2));
-                vst1q_f32(out.as_mut_ptr().add(i + 12), vmulq_f32(vmulq_f32(x3, scale), w3));
+                vst1q_f32(
+                    out.as_mut_ptr().add(i + 4),
+                    vmulq_f32(vmulq_f32(x1, scale), w1),
+                );
+                vst1q_f32(
+                    out.as_mut_ptr().add(i + 8),
+                    vmulq_f32(vmulq_f32(x2, scale), w2),
+                );
+                vst1q_f32(
+                    out.as_mut_ptr().add(i + 12),
+                    vmulq_f32(vmulq_f32(x3, scale), w3),
+                );
                 i += 16;
             }
             while i + 4 <= len {
