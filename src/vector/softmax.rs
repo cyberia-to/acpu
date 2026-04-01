@@ -80,25 +80,41 @@ pub fn normalize(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
         return;
     }
 
-    // 1. compute mean of squares
+    // Pass 1: sum of squares — 4 accumulators, 16-wide unroll for ILP
     let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
     let ss = {
-        let mut acc = unsafe { vdupq_n_f32(0.0) };
         unsafe {
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut a2 = vdupq_n_f32(0.0);
+            let mut a3 = vdupq_n_f32(0.0);
+            while i + 16 <= len {
+                let v0 = vld1q_f32(x.as_ptr().add(i));
+                let v1 = vld1q_f32(x.as_ptr().add(i + 4));
+                let v2 = vld1q_f32(x.as_ptr().add(i + 8));
+                let v3 = vld1q_f32(x.as_ptr().add(i + 12));
+                a0 = vfmaq_f32(a0, v0, v0);
+                a1 = vfmaq_f32(a1, v1, v1);
+                a2 = vfmaq_f32(a2, v2, v2);
+                a3 = vfmaq_f32(a3, v3, v3);
+                i += 16;
+            }
+            // 4-wide tail
             while i + 4 <= len {
                 let v = vld1q_f32(x.as_ptr().add(i));
-                acc = vfmaq_f32(acc, v, v);
+                a0 = vfmaq_f32(a0, v, v);
                 i += 4;
             }
+            let sum4 = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
+            let mut s = vaddvq_f32(sum4);
+            while i < len {
+                s += x[i] * x[i];
+                i += 1;
+            }
+            s
         }
-        let mut s = unsafe { vaddvq_f32(acc) };
-        while i < len {
-            s += x[i] * x[i];
-            i += 1;
-        }
-        s
     };
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -112,19 +128,33 @@ pub fn normalize(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
 
     let rms_inv = 1.0 / (ss / len as f32 + eps).sqrt();
 
-    // 2. normalize and scale by weight
+    // Pass 2: normalize and scale — 16-wide unroll, fused x*scale*weight
     i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
         unsafe {
             let scale = vdupq_n_f32(rms_inv);
+            while i + 16 <= len {
+                let x0 = vld1q_f32(x.as_ptr().add(i));
+                let x1 = vld1q_f32(x.as_ptr().add(i + 4));
+                let x2 = vld1q_f32(x.as_ptr().add(i + 8));
+                let x3 = vld1q_f32(x.as_ptr().add(i + 12));
+                let w0 = vld1q_f32(weight.as_ptr().add(i));
+                let w1 = vld1q_f32(weight.as_ptr().add(i + 4));
+                let w2 = vld1q_f32(weight.as_ptr().add(i + 8));
+                let w3 = vld1q_f32(weight.as_ptr().add(i + 12));
+                // fused: out = (x * scale) * weight
+                vst1q_f32(out.as_mut_ptr().add(i), vmulq_f32(vmulq_f32(x0, scale), w0));
+                vst1q_f32(out.as_mut_ptr().add(i + 4), vmulq_f32(vmulq_f32(x1, scale), w1));
+                vst1q_f32(out.as_mut_ptr().add(i + 8), vmulq_f32(vmulq_f32(x2, scale), w2));
+                vst1q_f32(out.as_mut_ptr().add(i + 12), vmulq_f32(vmulq_f32(x3, scale), w3));
+                i += 16;
+            }
             while i + 4 <= len {
                 let vx = vld1q_f32(x.as_ptr().add(i));
                 let vw = vld1q_f32(weight.as_ptr().add(i));
-                let normed = vmulq_f32(vx, scale);
-                let result = vmulq_f32(normed, vw);
-                vst1q_f32(out.as_mut_ptr().add(i), result);
+                vst1q_f32(out.as_mut_ptr().add(i), vmulq_f32(vmulq_f32(vx, scale), vw));
                 i += 4;
             }
         }
