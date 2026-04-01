@@ -6,6 +6,9 @@ description = "pure Rust driver for Apple Silicon CPU compute — AMX, NEON, num
 license = "LicenseRef-Cyber"
 repository = "https://github.com/cyberia-to/acpu"
 
+[dependencies]
+unimem = { path = "../unimem" }
+
 [lib]
 name = "acpu"
 path = "src/lib.rs"

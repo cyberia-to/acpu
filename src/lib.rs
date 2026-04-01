@@ -4,7 +4,8 @@
 //! matrix coprocessor (AMX), vector engine (NEON), numeric
 //! extensions, sync primitives, and performance counters.
 //!
-//! zero external dependencies. only inline assembly and system calls.
+//! memory via [`unimem::Block`] — IOSurface-backed pinned pages
+//! shared with GPU (aruminium) and ANE (rane). zero-copy by default.
 
 pub mod convert;
 pub mod gemm;
@@ -14,6 +15,9 @@ pub mod probe;
 pub mod pulse;
 pub mod sync;
 pub mod vector;
+
+// Memory foundation — re-export for single-import convenience
+pub use unimem::{Block, Layout, MemError, Tape};
 
 pub use convert::{
     cast_bf16_f32, cast_f16_f32, cast_f32_bf16, cast_f32_f16, cast_f32_i8, cast_i8_f32,

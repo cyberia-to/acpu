@@ -442,3 +442,355 @@ fn affinity_pin_any() {
 fn affinity_pin_e_core() {
     assert!(affinity::pin_e_core().is_ok());
 }
+
+// === 12. gemm — matmul_f16 ==================================================
+
+#[test]
+fn matmul_f16_identity() {
+    const N: usize = 4;
+    let a_f32: Vec<f32> = (1..=16).map(|i| i as f32).collect();
+    let mut a_h = vec![0u16; 16];
+    fp16_mod::cast_f32_f16(&mut a_h, &a_f32);
+
+    let mut b_f32 = vec![0.0f32; 16];
+    for i in 0..N {
+        b_f32[i * N + i] = 1.0;
+    }
+    let mut b_h = vec![0u16; 16];
+    fp16_mod::cast_f32_f16(&mut b_h, &b_f32);
+
+    let mut c = vec![0.0f32; 16];
+    gemm::matmul_f16(&a_h, &b_h, &mut c, N, N, N);
+    for i in 0..16 {
+        assert!(
+            (c[i] - a_f32[i]).abs() < 0.1,
+            "matmul_f16 id @{i}: got {}",
+            c[i]
+        );
+    }
+}
+
+// === 13. gemm — matmul_bf16 =================================================
+
+#[test]
+fn matmul_bf16_identity() {
+    const N: usize = 4;
+    let a_f32: Vec<f32> = (1..=16).map(|i| i as f32).collect();
+    let mut a_h = vec![0u16; 16];
+    bf16_mod::cast_f32_bf16(&mut a_h, &a_f32);
+
+    let mut b_f32 = vec![0.0f32; 16];
+    for i in 0..N {
+        b_f32[i * N + i] = 1.0;
+    }
+    let mut b_h = vec![0u16; 16];
+    bf16_mod::cast_f32_bf16(&mut b_h, &b_f32);
+
+    let mut c = vec![0.0f32; 16];
+    gemm::matmul_bf16(&a_h, &b_h, &mut c, N, N, N);
+    for i in 0..16 {
+        assert!(
+            (c[i] - a_f32[i]).abs() < 1.0,
+            "matmul_bf16 id @{i}: got {}",
+            c[i]
+        );
+    }
+}
+
+// === 14. numeric/complex — complex_mul_acc ==================================
+
+#[test]
+fn complex_mul_acc_known_pair() {
+    use acpu::numeric::complex;
+    // (3+4i) * (1+2i) = (3-8) + (6+4)i = -5 + 10i
+    let a = [3.0f32, 4.0];
+    let b = [1.0f32, 2.0];
+    let mut acc = [0.0f32, 0.0];
+    complex::complex_mul_acc(&mut acc, &a, &b);
+    assert!((acc[0] - (-5.0)).abs() < 1e-5, "re: got {}", acc[0]);
+    assert!((acc[1] - 10.0).abs() < 1e-5, "im: got {}", acc[1]);
+}
+
+#[test]
+fn complex_mul_acc_multiple_pairs() {
+    use acpu::numeric::complex;
+    // pair0: (1+0i)*(0+1i) = 0+1i
+    // pair1: (0+1i)*(0+1i) = -1+0i
+    let a = [1.0f32, 0.0, 0.0, 1.0];
+    let b = [0.0f32, 1.0, 0.0, 1.0];
+    let mut acc = [0.0f32; 4];
+    complex::complex_mul_acc(&mut acc, &a, &b);
+    assert!((acc[0] - 0.0).abs() < 1e-5);
+    assert!((acc[1] - 1.0).abs() < 1e-5);
+    assert!((acc[2] - (-1.0)).abs() < 1e-5);
+    assert!((acc[3] - 0.0).abs() < 1e-5);
+}
+
+// === 15. AMX matrix ops — ldx/stx, ldy/sty, ldz/stz, fma32 ================
+
+#[test]
+fn amx_ldx_stx_roundtrip() {
+    use std::alloc::{alloc_zeroed, dealloc, Layout};
+
+    let ctx = matrix::Matrix::new().unwrap();
+    let layout = Layout::from_size_align(64, 64).unwrap();
+
+    unsafe {
+        let src = alloc_zeroed(layout);
+        let dst = alloc_zeroed(layout);
+
+        // Fill source with known pattern
+        for i in 0..16 {
+            *(src as *mut f32).add(i) = (i + 1) as f32;
+        }
+
+        let xr = matrix::XRow::new(0).unwrap();
+        ctx.ldx(src, xr);
+        ctx.stx(dst, xr);
+
+        for i in 0..16 {
+            let val = *(dst as *const f32).add(i);
+            assert!(
+                (val - (i + 1) as f32).abs() < 1e-6,
+                "ldx/stx @{i}: got {val}"
+            );
+        }
+
+        dealloc(src, layout);
+        dealloc(dst, layout);
+    }
+}
+
+#[test]
+fn amx_ldy_sty_roundtrip() {
+    use std::alloc::{alloc_zeroed, dealloc, Layout};
+
+    let ctx = matrix::Matrix::new().unwrap();
+    let layout = Layout::from_size_align(64, 64).unwrap();
+
+    unsafe {
+        let src = alloc_zeroed(layout);
+        let dst = alloc_zeroed(layout);
+
+        for i in 0..16 {
+            *(src as *mut f32).add(i) = (i * 3) as f32;
+        }
+
+        let yr = matrix::YRow::new(2).unwrap();
+        ctx.ldy(src, yr);
+        ctx.sty(dst, yr);
+
+        for i in 0..16 {
+            let val = *(dst as *const f32).add(i);
+            assert!(
+                (val - (i * 3) as f32).abs() < 1e-6,
+                "ldy/sty @{i}: got {val}"
+            );
+        }
+
+        dealloc(src, layout);
+        dealloc(dst, layout);
+    }
+}
+
+#[test]
+fn amx_ldz_stz_roundtrip() {
+    use std::alloc::{alloc_zeroed, dealloc, Layout};
+
+    let ctx = matrix::Matrix::new().unwrap();
+    let layout = Layout::from_size_align(64, 64).unwrap();
+
+    unsafe {
+        let src = alloc_zeroed(layout);
+        let dst = alloc_zeroed(layout);
+
+        for i in 0..16 {
+            *(src as *mut f32).add(i) = (i * 7) as f32;
+        }
+
+        let zr = matrix::ZRow::new(0).unwrap();
+        ctx.ldz(src, zr);
+        ctx.stz(dst, zr);
+
+        for i in 0..16 {
+            let val = *(dst as *const f32).add(i);
+            assert!(
+                (val - (i * 7) as f32).abs() < 1e-6,
+                "ldz/stz @{i}: got {val}"
+            );
+        }
+
+        dealloc(src, layout);
+        dealloc(dst, layout);
+    }
+}
+
+#[test]
+fn amx_fma32_outer_product() {
+    use acpu::matrix::asm::{amx_op, OP_FMA32, OP_LDX, OP_LDY, OP_LDZ, OP_STZ};
+    use acpu::matrix::fma::fma_first;
+    use acpu::matrix::regs::{XRow, YRow};
+    use std::alloc::{alloc_zeroed, dealloc, Layout};
+
+    let _ctx = matrix::Matrix::new().unwrap();
+
+    unsafe {
+        let layout16 = Layout::from_size_align(64, 64).unwrap();
+        let layout_z = Layout::from_size_align(16 * 16 * 4, 64).unwrap();
+
+        let x_buf = alloc_zeroed(layout16) as *mut f32;
+        let y_buf = alloc_zeroed(layout16) as *mut f32;
+        let zero_buf = alloc_zeroed(layout16);
+        let z_buf = alloc_zeroed(layout_z) as *mut f32;
+
+        // X[0] = [1,2,...,16], Y[0] = [1,1,...,1]
+        for i in 0..16 {
+            *x_buf.add(i) = (i + 1) as f32;
+            *y_buf.add(i) = 1.0;
+        }
+
+        // Clear all Z rows
+        for row in 0u8..64 {
+            amx_op::<OP_LDZ>((zero_buf as u64) | ((row as u64) << 56));
+        }
+
+        amx_op::<OP_LDX>((x_buf as u64) | (0u64 << 56));
+        amx_op::<OP_LDY>((y_buf as u64) | (0u64 << 56));
+
+        let op = fma_first(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
+        amx_op::<OP_FMA32>(op);
+
+        // Store tile 0: Z rows 0,4,8,...,60
+        for j in 0u8..16 {
+            let z_row = j * 4;
+            let dst = z_buf.add(j as usize * 16) as *mut u8;
+            amx_op::<OP_STZ>((dst as u64) | ((z_row as u64) << 56));
+        }
+
+        // Verify: Z[j][i] = x[i] * y[j] = (i+1) * 1
+        for j in 0..16 {
+            for i in 0..16 {
+                let val = *z_buf.add(j * 16 + i);
+                let expected = (i + 1) as f32;
+                assert!(
+                    (val - expected).abs() < 1e-5,
+                    "fma32 Z[{j}][{i}]: got {val} expected {expected}"
+                );
+            }
+        }
+
+        dealloc(x_buf as *mut u8, layout16);
+        dealloc(y_buf as *mut u8, layout16);
+        dealloc(zero_buf, layout16);
+        dealloc(z_buf as *mut u8, layout_z);
+    }
+}
+
+// === 16. Counters (PMU) =====================================================
+
+#[test]
+fn pmu_counters_new() {
+    use acpu::pulse::{Counter, Counters};
+    match Counters::new(&[Counter::Cycles, Counter::Instructions]) {
+        Ok(mut ctx) => {
+            ctx.start();
+            let a = ctx.read();
+            // Small workload
+            let mut sum = 0u64;
+            for i in 0..1000 {
+                sum = sum.wrapping_add(i);
+            }
+            let _ = std::hint::black_box(sum);
+            let b = ctx.read();
+            ctx.stop();
+            let c = ctx.elapsed(&a, &b);
+            // Cycles and instructions should be non-zero after real work
+            assert!(
+                c.cycles > 0 || c.instructions > 0,
+                "counters should record something"
+            );
+        }
+        Err(e) => {
+            // Expected on non-root: PmuNotAvailable or PmuConfigFailed
+            let msg = format!("{e}");
+            assert!(
+                msg.contains("PMU") || msg.contains("kpc"),
+                "unexpected error: {msg}"
+            );
+        }
+    }
+}
+
+// === 17. sync barriers ======================================================
+
+#[test]
+fn sync_barriers_no_crash() {
+    unsafe {
+        acpu::sync::barrier();
+        acpu::sync::fence();
+        acpu::sync::isb();
+    }
+}
+
+// === 18. sync wait/wake =====================================================
+
+#[test]
+fn sync_wake_no_crash() {
+    // SEV is safe to call unconditionally — it just signals an event.
+    // WFE would block if no prior event, so we only test wake (SEV).
+    unsafe {
+        acpu::sync::wake();
+    }
+}
+
+#[test]
+fn sync_wake_then_wait() {
+    // SEV sets the event flag, then WFE consumes it without blocking.
+    unsafe {
+        acpu::sync::wake();
+        acpu::sync::wait();
+    }
+}
+
+// === 19. prefetch ===========================================================
+
+#[test]
+fn prefetch_no_crash() {
+    let data = [0u8; 128];
+    let mut wdata = [0u8; 128];
+    unsafe {
+        acpu::sync::prefetch::prefetch_l1(data.as_ptr());
+        acpu::sync::prefetch::prefetch_l2(data.as_ptr());
+        acpu::sync::prefetch::prefetch_l1_write(wdata.as_mut_ptr());
+    }
+}
+
+// === 20. probe::chip() and probe::has() =====================================
+
+#[test]
+fn probe_chip_not_unknown() {
+    let c = probe::chip();
+    assert_ne!(c, probe::Chip::Unknown);
+}
+
+#[test]
+fn probe_has_returns_consistent() {
+    let feats = probe::scan();
+    assert_eq!(probe::has(probe::Feature::Fp16), feats.has_fp16);
+    assert_eq!(probe::has(probe::Feature::Bf16), feats.has_bf16);
+    assert_eq!(probe::has(probe::Feature::DotProd), feats.has_dotprod);
+    assert_eq!(probe::has(probe::Feature::I8mm), feats.has_i8mm);
+    assert_eq!(probe::has(probe::Feature::Fcma), feats.has_fcma);
+    assert_eq!(probe::has(probe::Feature::Rdm), feats.has_rdm);
+    assert_eq!(probe::has(probe::Feature::Lse), feats.has_lse);
+    assert_eq!(probe::has(probe::Feature::Lrcpc), feats.has_lrcpc);
+}
+
+// === 21. reduce::length (norm_l2) — verify exists and works =================
+// Already tested as reduce_norm_l2 above. Adding an explicit named test.
+
+#[test]
+fn reduce_length_explicit() {
+    let v = vec![3.0f32, 4.0];
+    assert!((reduce::length(&v) - 5.0).abs() < 1e-5);
+}
