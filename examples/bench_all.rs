@@ -818,56 +818,29 @@ fn main() {
             let a = vec![1f32; sz * sz];
             let b = vec![1f32; sz * sz];
             let mut c_buf = vec![0f32; sz * sz];
-            let it = if sz >= 2048 {
-                2
-            } else if sz >= 512 {
-                5
-            } else {
-                20
-            };
-            unsafe {
-                cblas_sgemm(
-                    101,
-                    111,
-                    111,
-                    sz as i32,
-                    sz as i32,
-                    sz as i32,
-                    1.0,
-                    a.as_ptr(),
-                    sz as i32,
-                    b.as_ptr(),
-                    sz as i32,
-                    0.0,
-                    c_buf.as_mut_ptr(),
-                    sz as i32,
-                );
+            let it = if sz >= 2048 { 5 } else if sz >= 512 { 10 } else { 30 };
+            // warmup
+            for _ in 0..3 {
+                c_buf.fill(0.0);
+                unsafe {
+                    cblas_sgemm(101, 111, 111, sz as i32, sz as i32, sz as i32,
+                        1.0, a.as_ptr(), sz as i32, b.as_ptr(), sz as i32,
+                        0.0, c_buf.as_mut_ptr(), sz as i32);
+                }
             }
-            let mut t = vec![0u64; it];
-            for i in 0..it {
+            let mut best = u64::MAX;
+            for _ in 0..it {
                 c_buf.fill(0.0);
                 let s = Instant::now();
                 unsafe {
-                    cblas_sgemm(
-                        101,
-                        111,
-                        111,
-                        sz as i32,
-                        sz as i32,
-                        sz as i32,
-                        1.0,
-                        a.as_ptr(),
-                        sz as i32,
-                        b.as_ptr(),
-                        sz as i32,
-                        0.0,
-                        c_buf.as_mut_ptr(),
-                        sz as i32,
-                    );
+                    cblas_sgemm(101, 111, 111, sz as i32, sz as i32, sz as i32,
+                        1.0, a.as_ptr(), sz as i32, b.as_ptr(), sz as i32,
+                        0.0, c_buf.as_mut_ptr(), sz as i32);
                 }
-                t[i] = s.elapsed().as_nanos() as u64;
+                let t = s.elapsed().as_nanos() as u64;
+                if t < best { best = t; }
             }
-            results.push((sz, med(&mut t)));
+            results.push((sz, best));
         }
         results
     })
@@ -879,28 +852,138 @@ fn main() {
         let bm: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
         let mut c_buf = vec![0f32; sz * sz];
         let it = if sz >= 2048 {
-            2
-        } else if sz >= 512 {
             5
+        } else if sz >= 512 {
+            10
         } else {
-            20
+            30
         };
-        acpu::matmul_f32(&a, &bm, &mut c_buf, sz, sz, sz);
-        let mut t = vec![0u64; it];
-        for i in 0..it {
+        // warmup: 3 calls to warm caches and stabilize thermal
+        for _ in 0..3 {
+            c_buf.fill(0.0);
+            acpu::matmul_f32(&a, &bm, &mut c_buf, sz, sz, sz);
+        }
+        let mut best = u64::MAX;
+        for _ in 0..it {
             c_buf.fill(0.0);
             let s = Instant::now();
             acpu::matmul_f32(&a, &bm, &mut c_buf, sz, sz, sz);
-            t[i] = s.elapsed().as_nanos() as u64;
+            let t = s.elapsed().as_nanos() as u64;
+            if t < best {
+                best = t;
+            }
         }
-        let an = med(&mut t);
         let ac = apple_gemm.iter().find(|r| r.0 == sz).unwrap().1;
         let ops = 2.0 * (sz as f64).powi(3);
         row_gf(
             &format!("sgemm {sz}×{sz}"),
-            ops / an as f64,
+            ops / best as f64,
             ops / ac as f64,
         );
+    }
+
+    // ── HGEMM / BGEMM / QGEMM (reference, scalar) ────────────────────
+
+    {
+        eprintln!("\n  MIXED-PRECISION GEMM (256×256, reference impl)");
+        eprintln!(
+            "  {:<18} {:>9} {:>9}",
+            "operation", "GFLOPS", "note"
+        );
+        eprintln!("  {}", "─".repeat(40));
+
+        let sz = 256;
+        let ops = 2.0 * (sz as f64).powi(3);
+
+        // hgemm (fp16 in, fp32 accum)
+        {
+            let a16: Vec<u16> = (0..sz * sz).map(|i| acpu::numeric::fp16::f32_to_fp16((i % 7) as f32 * 0.1)).collect();
+            let b16: Vec<u16> = (0..sz * sz).map(|i| acpu::numeric::fp16::f32_to_fp16((i % 11) as f32 * 0.1)).collect();
+            let mut c = vec![0f32; sz * sz];
+            acpu::matmul_f16(&a16, &b16, &mut c, sz, sz, sz); // warmup
+            let mut best = u64::MAX;
+            for _ in 0..5 {
+                c.fill(0.0);
+                let s = Instant::now();
+                acpu::matmul_f16(&a16, &b16, &mut c, sz, sz, sz);
+                let t = s.elapsed().as_nanos() as u64;
+                if t < best { best = t; }
+            }
+            let gf = ops / best as f64;
+            eprintln!("  {:<18} {:>7.1}GF  scalar (AMX FMA16 planned)", "hgemm fp16", gf);
+        }
+
+        // bgemm (bf16 in, fp32 accum)
+        {
+            let a16: Vec<u16> = (0..sz * sz).map(|i| acpu::numeric::bf16::f32_to_bf16((i % 7) as f32 * 0.1)).collect();
+            let b16: Vec<u16> = (0..sz * sz).map(|i| acpu::numeric::bf16::f32_to_bf16((i % 11) as f32 * 0.1)).collect();
+            let mut c = vec![0f32; sz * sz];
+            acpu::matmul_bf16(&a16, &b16, &mut c, sz, sz, sz);
+            let mut best = u64::MAX;
+            for _ in 0..5 {
+                c.fill(0.0);
+                let s = Instant::now();
+                acpu::matmul_bf16(&a16, &b16, &mut c, sz, sz, sz);
+                let t = s.elapsed().as_nanos() as u64;
+                if t < best { best = t; }
+            }
+            let gf = ops / best as f64;
+            eprintln!("  {:<18} {:>7.1}GF  scalar (AMX FMABF16 planned)", "bgemm bf16", gf);
+        }
+
+        // qgemm (i8 in, fp32 accum)
+        {
+            let a8: Vec<i8> = (0..sz * sz).map(|i| (i % 127) as i8).collect();
+            let b8: Vec<i8> = (0..sz * sz).map(|i| (i % 127) as i8).collect();
+            let mut c = vec![0f32; sz * sz];
+            acpu::matmul_i8(&a8, &b8, &mut c, sz, sz, sz, 0.01, 0);
+            let mut best = u64::MAX;
+            for _ in 0..5 {
+                c.fill(0.0);
+                let s = Instant::now();
+                acpu::matmul_i8(&a8, &b8, &mut c, sz, sz, sz, 0.01, 0);
+                let t = s.elapsed().as_nanos() as u64;
+                if t < best { best = t; }
+            }
+            let gf = ops / best as f64;
+            eprintln!("  {:<18} {:>7.1}GF  scalar (AMX MAC16 planned)", "qgemm i8", gf);
+        }
+    }
+
+    // ── ROPE ────────────────────────────────────────────────────────────
+
+    {
+        eprintln!("\n  ROPE (rotary positional embedding, 4096 dim)");
+        let dim = 4096;
+        let x: Vec<f32> = (0..dim).map(|i| (i as f32) * 0.01).collect();
+        let freqs: Vec<f32> = (0..dim / 2).map(|i| 1.0 / 10000f32.powf(2.0 * i as f32 / dim as f32)).collect();
+        let mut out = vec![0f32; dim];
+        let rope_ns = ns(|| acpu::vector::rotate(&mut out, &x, &freqs, 42));
+        eprintln!("  rotate {dim}: {}ns", rope_ns);
+    }
+
+    // ── THREAD SCALING (sgemm 1024×1024) ────────────────────────────────
+
+    {
+        eprintln!("\n  THREAD SCALING (sgemm 1024×1024)");
+        let sz = 1024;
+        let a: Vec<f32> = (0..sz * sz).map(|i| (i % 7) as f32 * 0.1).collect();
+        let b: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
+        let mut c = vec![0f32; sz * sz];
+        let ops = 2.0 * (sz as f64).powi(3);
+        // warmup
+        for _ in 0..3 { c.fill(0.0); acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz); }
+        let mut best = u64::MAX;
+        for _ in 0..10 {
+            c.fill(0.0);
+            let s = Instant::now();
+            acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
+            let t = s.elapsed().as_nanos() as u64;
+            if t < best { best = t; }
+        }
+        let gf = ops / best as f64;
+        let cores = acpu::probe::scan().p_cores;
+        eprintln!("  {} P-cores: {:.0} GFLOPS ({:.0} GF/core)", cores, gf, gf / cores as f64);
     }
 
     // ╔═══════════════════════════════════════════════════════════════════╗
