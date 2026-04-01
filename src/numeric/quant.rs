@@ -6,7 +6,7 @@
 ///
 /// `scale` is the quantization step size. Typically computed as
 /// `(max - min) / 255` for asymmetric or `max(abs) / 127` for symmetric.
-pub fn cvt_f32_i8(dst: &mut [i8], src: &[f32], scale: f32) {
+pub fn cast_f32_i8(dst: &mut [i8], src: &[f32], scale: f32) {
     let n = dst.len().min(src.len());
     let inv_scale = 1.0 / scale;
 
@@ -79,7 +79,7 @@ pub fn cvt_f32_i8(dst: &mut [i8], src: &[f32], scale: f32) {
 /// Dequantize int8 to f32: `dst[i] = (src[i] - zero) * scale`.
 ///
 /// `zero` is the zero-point offset. For symmetric quantization, `zero = 0`.
-pub fn cvt_i8_f32(dst: &mut [f32], src: &[i8], scale: f32, zero: i8) {
+pub fn cast_i8_f32(dst: &mut [f32], src: &[i8], scale: f32, zero: i8) {
     let n = dst.len().min(src.len());
 
     #[cfg(target_arch = "aarch64")]
@@ -157,8 +157,8 @@ mod tests {
         let mut qi8 = vec![0i8; 32];
         let mut dst = vec![0.0f32; 32];
 
-        cvt_f32_i8(&mut qi8, &src, scale);
-        cvt_i8_f32(&mut dst, &qi8, scale, 0);
+        cast_f32_i8(&mut qi8, &src, scale);
+        cast_i8_f32(&mut dst, &qi8, scale, 0);
 
         for i in 0..32 {
             let err = (dst[i] - src[i]).abs();
@@ -176,7 +176,7 @@ mod tests {
     fn clamp_overflow() {
         let src = [1000.0f32, -1000.0];
         let mut dst = [0i8; 2];
-        cvt_f32_i8(&mut dst, &src, 1.0);
+        cast_f32_i8(&mut dst, &src, 1.0);
         assert_eq!(dst[0], 127);
         assert_eq!(dst[1], -128);
     }

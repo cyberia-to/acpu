@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Compound vector operations -- softmax, rmsnorm
+// Compound vector operations -- softmax, normalize
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "aarch64")]
@@ -71,10 +71,10 @@ pub fn softmax(x: &mut [f32]) {
 
 /// RMS normalization: out_i = (x_i / rms) * weight_i
 /// where rms = sqrt(mean(x^2) + eps)
-pub fn rmsnorm(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
+pub fn normalize(out: &mut [f32], x: &[f32], weight: &[f32], eps: f32) {
     let len = x.len();
-    assert_eq!(len, weight.len(), "rmsnorm: x and weight length mismatch");
-    assert!(out.len() >= len, "rmsnorm: output buffer too small");
+    assert_eq!(len, weight.len(), "normalize: x and weight length mismatch");
+    assert!(out.len() >= len, "normalize: output buffer too small");
 
     if len == 0 {
         return;
@@ -169,22 +169,22 @@ mod tests {
     }
 
     #[test]
-    fn test_rmsnorm_unit_weight() {
+    fn test_normalize_unit_weight() {
         let x = vec![1.0, 2.0, 3.0, 4.0];
         let w = vec![1.0; 4];
         let mut out = vec![0.0; 4];
-        rmsnorm(&mut out, &x, &w, 1e-5);
-        // After rmsnorm with unit weights, the RMS of out should be ~1
+        normalize(&mut out, &x, &w, 1e-5);
+        // After normalize with unit weights, the RMS of out should be ~1
         let ss: f32 = out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32;
         assert!((ss - 1.0).abs() < 1e-3);
     }
 
     #[test]
-    fn test_rmsnorm_scaling() {
+    fn test_normalize_scaling() {
         let x = vec![2.0; 8];
         let w = vec![3.0; 8];
         let mut out = vec![0.0; 8];
-        rmsnorm(&mut out, &x, &w, 1e-5);
+        normalize(&mut out, &x, &w, 1e-5);
         // rms = 2.0, so normalized = 1.0, * weight 3.0 = 3.0
         for &v in &out {
             assert!((v - 3.0).abs() < 1e-3);

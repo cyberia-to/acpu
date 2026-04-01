@@ -59,7 +59,7 @@ pub fn f32_to_fp16(v: f32) -> u16 {
 ///
 /// On aarch64 the hot path processes 32 elements per iteration (4x unrolled
 /// NEON `fcvtl`/`fcvtl2`), with an 8-element tail loop and scalar remainder.
-pub fn cvt_f16_f32(dst: &mut [f32], src: &[u16]) {
+pub fn cast_f16_f32(dst: &mut [f32], src: &[u16]) {
     let n = dst.len().min(src.len());
 
     #[cfg(target_arch = "aarch64")]
@@ -130,7 +130,7 @@ pub fn cvt_f16_f32(dst: &mut [f32], src: &[u16]) {
 ///
 /// On aarch64 the hot path processes 32 elements per iteration (4x unrolled
 /// NEON `fcvtn`/`fcvtn2`), with an 8-element tail loop and scalar remainder.
-pub fn cvt_f32_f16(dst: &mut [u16], src: &[f32]) {
+pub fn cast_f32_f16(dst: &mut [u16], src: &[f32]) {
     let n = dst.len().min(src.len());
 
     #[cfg(target_arch = "aarch64")]
@@ -273,8 +273,8 @@ mod tests {
         let src: Vec<f32> = (0..100).map(|i| (i as f32 - 50.0) * 0.1).collect();
         let mut fp16 = vec![0u16; 100];
         let mut dst = vec![0.0f32; 100];
-        cvt_f32_f16(&mut fp16, &src);
-        cvt_f16_f32(&mut dst, &fp16);
+        cast_f32_f16(&mut fp16, &src);
+        cast_f16_f32(&mut dst, &fp16);
         for i in 0..100 {
             assert!(
                 (dst[i] - src[i]).abs() < 0.01,

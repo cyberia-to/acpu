@@ -7,13 +7,13 @@ fn main() {
         // warmup
         for _ in 0..200 {
             c.fill(0.0);
-            acpu::sgemm(&a, &b, &mut c, n, n, n);
+            acpu::matmul_f32(&a, &b, &mut c, n, n, n);
         }
         let mut times = Vec::with_capacity(10000);
         for _ in 0..10000 {
             c.fill(0.0);
             let t = Instant::now();
-            acpu::sgemm(&a, &b, &mut c, n, n, n);
+            acpu::matmul_f32(&a, &b, &mut c, n, n, n);
             times.push(t.elapsed().as_nanos() as u64);
         }
         times.sort();

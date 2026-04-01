@@ -1,4 +1,4 @@
-//! Simple 64x64 matrix multiply example using acpu::sgemm.
+//! Simple 64x64 matrix multiply example using acpu::matmul_f32.
 //!
 //! Run with: `cargo run --example matmul --release`
 
@@ -18,7 +18,7 @@ fn main() {
     let mut c = vec![0.0f32; N * N];
 
     let start = std::time::Instant::now();
-    acpu::sgemm(&a, &b, &mut c, N, N, N);
+    acpu::matmul_f32(&a, &b, &mut c, N, N, N);
     let elapsed = start.elapsed();
 
     // Verify: C should equal A (all ones) since B is identity.
@@ -30,7 +30,7 @@ fn main() {
         }
     }
 
-    println!("acpu::sgemm {N}x{N} x {N}x{N}");
+    println!("acpu::matmul_f32 {N}x{N} x {N}x{N}");
     println!("  elapsed:   {:.3?}", elapsed);
     println!("  max error: {:.2e}", max_err);
 

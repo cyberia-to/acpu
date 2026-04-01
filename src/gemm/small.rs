@@ -5,9 +5,16 @@
 use super::{MR, NR};
 use crate::matrix::tile;
 
-/// Direct AMX sgemm for small matrices where n*k ≤ 32K.
+/// Direct AMX matmul_f32 for small matrices where n*k ≤ 32K.
 #[cfg(target_arch = "aarch64")]
-pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+pub(super) fn matmul_f32_amx_direct(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) {
     super::ensure_amx();
 
     let n_mr = m.div_ceil(MR);
@@ -18,16 +25,16 @@ pub(super) fn sgemm_amx_direct(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n:
     let use_pair = m % 32 == 0 && n % 32 == 0 && m >= 32 && n >= 32;
 
     if use_pair {
-        sgemm_pair32(a, b, c, m, n, k, n_mr, n_nr, bs);
+        matmul_f32_pair32(a, b, c, m, n, k, n_mr, n_nr, bs);
     } else {
-        sgemm_16x64(a, b, c, m, n, k, n_mr, n_nr, bs);
+        matmul_f32_16x64(a, b, c, m, n, k, n_mr, n_nr, bs);
     }
 }
 
 /// 32×32 pair-load path: interleaved A pack + pair LDY.
 /// 7 ops/k-step (1 LDY pair + 2 LDX + 4 FMA) vs 9 in 16×64.
 #[cfg(target_arch = "aarch64")]
-fn sgemm_pair32(
+fn matmul_f32_pair32(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],
@@ -156,7 +163,7 @@ pub(super) fn pack_a_interleaved_neon(
 
 /// Original 16×64 path with interleaved pack/compute.
 #[cfg(target_arch = "aarch64")]
-fn sgemm_16x64(
+fn matmul_f32_16x64(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],

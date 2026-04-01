@@ -32,7 +32,7 @@ fn gen256(offset: f32, scale: f32) -> Vec<f32> {
 
 #[test]
 fn probe_detect_valid_caps() {
-    let c = probe::detect();
+    let c = probe::scan();
     assert_ne!(c.chip, probe::Chip::Unknown);
     assert!(c.amx_ver == 1 || c.amx_ver == 2);
     assert!(c.has_fp16 && c.has_dotprod && c.has_lse && c.has_lrcpc);
@@ -44,14 +44,14 @@ fn probe_detect_valid_caps() {
 
 #[test]
 fn probe_detect_cached() {
-    let a = probe::detect() as *const probe::Caps;
-    let b = probe::detect() as *const probe::Caps;
+    let a = probe::scan() as *const probe::Features;
+    let b = probe::scan() as *const probe::Features;
     assert_eq!(a, b);
 }
 
 #[test]
 fn probe_has_feature() {
-    let c = probe::detect();
+    let c = probe::scan();
     assert_eq!(c.has(probe::Feature::Fp16), c.has_fp16);
     assert_eq!(c.has(probe::Feature::Bf16), c.has_bf16);
     assert_eq!(c.has(probe::Feature::DotProd), c.has_dotprod);
@@ -86,8 +86,8 @@ fn fp16_bulk_1024() {
     let src: Vec<f32> = (0..n).map(|i| (i as f32 - 512.0) * 0.1).collect();
     let mut h = vec![0u16; n];
     let mut dst = vec![0.0f32; n];
-    fp16_mod::cvt_f32_f16(&mut h, &src);
-    fp16_mod::cvt_f16_f32(&mut dst, &h);
+    fp16_mod::cast_f32_f16(&mut h, &src);
+    fp16_mod::cast_f16_f32(&mut dst, &h);
     for i in 0..n {
         assert!((dst[i] - src[i]).abs() < 0.1, "fp16 bulk @{i}");
     }
@@ -113,8 +113,8 @@ fn bf16_bulk() {
     let src: Vec<f32> = (0..n).map(|i| (i as f32 - 128.0) * 0.5).collect();
     let mut h = vec![0u16; n];
     let mut dst = vec![0.0f32; n];
-    bf16_mod::cvt_f32_bf16(&mut h, &src);
-    bf16_mod::cvt_bf16_f32(&mut dst, &h);
+    bf16_mod::cast_f32_bf16(&mut h, &src);
+    bf16_mod::cast_bf16_f32(&mut dst, &h);
     for i in 0..n {
         assert!((dst[i] - src[i]).abs() < 1.0, "bf16 bulk @{i}");
     }
@@ -128,8 +128,8 @@ fn quant_roundtrip() {
     let scale = src.iter().map(|v| v.abs()).fold(0.0f32, f32::max) / 127.0;
     let mut qi = vec![0i8; 64];
     let mut dst = vec![0.0f32; 64];
-    quant::cvt_f32_i8(&mut qi, &src, scale);
-    quant::cvt_i8_f32(&mut dst, &qi, scale, 0);
+    quant::cast_f32_i8(&mut qi, &src, scale);
+    quant::cast_i8_f32(&mut dst, &qi, scale, 0);
     for i in 0..64 {
         assert!((dst[i] - src[i]).abs() <= scale + 1e-6, "quant @{i}");
     }
@@ -138,7 +138,7 @@ fn quant_roundtrip() {
 #[test]
 fn quant_clamp() {
     let mut qi = [0i8; 2];
-    quant::cvt_f32_i8(&mut qi, &[200.0, -200.0], 1.0);
+    quant::cast_f32_i8(&mut qi, &[200.0, -200.0], 1.0);
     assert_eq!(qi, [127, -128]);
 }
 
@@ -250,7 +250,7 @@ fn reduce_dot() {
 fn reduce_norm_l2() {
     let v = gen256(-128.0, 0.01);
     let r: f64 = v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
-    assert!((reduce::norm_l2(&v) as f64 - r).abs() < 1e-3);
+    assert!((reduce::length(&v) as f64 - r).abs() < 1e-3);
 }
 
 #[test]
@@ -258,7 +258,7 @@ fn reduce_empty() {
     assert_eq!(reduce::sum(&[]), 0.0);
     assert_eq!(reduce::max(&[]), f32::NEG_INFINITY);
     assert_eq!(reduce::min(&[]), f32::INFINITY);
-    assert_eq!(reduce::norm_l2(&[]), 0.0);
+    assert_eq!(reduce::length(&[]), 0.0);
 }
 
 // === 7. vector/softmax ======================================================
@@ -294,7 +294,7 @@ fn softmax_equal() {
 fn rmsnorm_unit_weight() {
     let x = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let mut out = vec![0.0f32; 8];
-    softmax::rmsnorm(&mut out, &x, &vec![1.0; 8], 1e-5);
+    softmax::normalize(&mut out, &x, &vec![1.0; 8], 1e-5);
     let rms2: f32 = out.iter().map(|v| v * v).sum::<f32>() / 8.0;
     assert!((rms2 - 1.0).abs() < 1e-3);
 }
@@ -302,7 +302,7 @@ fn rmsnorm_unit_weight() {
 #[test]
 fn rmsnorm_scaling() {
     let mut out = vec![0.0f32; 16];
-    softmax::rmsnorm(&mut out, &vec![2.0; 16], &vec![3.0; 16], 1e-5);
+    softmax::normalize(&mut out, &vec![2.0; 16], &vec![3.0; 16], 1e-5);
     for &v in &out {
         assert!((v - 3.0).abs() < 1e-3);
     }
@@ -314,7 +314,7 @@ fn rmsnorm_scaling() {
 fn rope_identity_at_zero() {
     let x = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
     let mut out = vec![0.0f32; 6];
-    rope::rope(&mut out, &x, &[0.1, 0.5, 1.0], 0);
+    rope::rotate(&mut out, &x, &[0.1, 0.5, 1.0], 0);
     for i in 0..6 {
         assert!((out[i] - x[i]).abs() < 1e-5, "rope id @{i}");
     }
@@ -323,7 +323,7 @@ fn rope_identity_at_zero() {
 #[test]
 fn rope_first_pair() {
     let mut out = vec![0.0f32; 2];
-    rope::rope(&mut out, &[1.0, 0.0], &[1.0], 1);
+    rope::rotate(&mut out, &[1.0, 0.0], &[1.0], 1);
     assert!((out[0] - 1.0f32.cos()).abs() < 1e-5);
     assert!((out[1] - 1.0f32.sin()).abs() < 1e-5);
 }
@@ -332,7 +332,7 @@ fn rope_first_pair() {
 fn rope_preserves_norms() {
     let x = vec![3.0f32, 4.0, 1.0, 2.0, 5.0, 0.0];
     let mut out = vec![0.0f32; 6];
-    rope::rope(&mut out, &x, &[0.5, 1.0, 2.0], 10);
+    rope::rotate(&mut out, &x, &[0.5, 1.0, 2.0], 10);
     for p in 0..3 {
         let ni = (x[2 * p].powi(2) + x[2 * p + 1].powi(2)).sqrt();
         let no = (out[2 * p].powi(2) + out[2 * p + 1].powi(2)).sqrt();
@@ -351,7 +351,7 @@ fn sgemm_identity() {
         b[i * N + i] = 1.0;
     }
     let mut c = vec![0.0f32; 16];
-    gemm::sgemm(&a, &b, &mut c, N, N, N);
+    gemm::matmul_f32(&a, &b, &mut c, N, N, N);
     for i in 0..16 {
         assert!((c[i] - a[i]).abs() < 1e-4, "sgemm id @{i}");
     }
@@ -373,7 +373,7 @@ fn sgemm_vs_naive() {
         }
     }
     let mut c = vec![0.0f32; S * S];
-    gemm::sgemm(&a, &b, &mut c, S, S, S);
+    gemm::matmul_f32(&a, &b, &mut c, S, S, S);
     for i in 0..S * S {
         assert!((c[i] - c_ref[i]).abs() < 1e-3, "sgemm naive @{i}");
     }
@@ -383,7 +383,7 @@ fn sgemm_vs_naive() {
 
 #[test]
 fn amx_ctx_new() {
-    assert!(matrix::AmxCtx::new().is_ok());
+    assert!(matrix::Matrix::new().is_ok());
 }
 
 #[test]

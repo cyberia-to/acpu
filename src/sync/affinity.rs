@@ -4,7 +4,7 @@
 //! mechanism is to set the pthread QoS class, which the kernel uses to
 //! schedule the thread onto P-cores (high QoS) or E-cores (low QoS).
 
-use crate::RamxError;
+use crate::CpuError;
 
 // ---------------------------------------------------------------------------
 // QoS class constants (from <sys/qos.h>)
@@ -33,7 +33,7 @@ extern "C" {
 pub fn pin_p_core() -> crate::Result<()> {
     let rc = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
     if rc != 0 {
-        return Err(RamxError::AffinityFailed(format!(
+        return Err(CpuError::AffinityFailed(format!(
             "pthread_set_qos_class_self_np(USER_INTERACTIVE) returned {rc}"
         )));
     }
@@ -47,7 +47,7 @@ pub fn pin_p_core() -> crate::Result<()> {
 pub fn pin_e_core() -> crate::Result<()> {
     let rc = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) };
     if rc != 0 {
-        return Err(RamxError::AffinityFailed(format!(
+        return Err(CpuError::AffinityFailed(format!(
             "pthread_set_qos_class_self_np(BACKGROUND) returned {rc}"
         )));
     }
@@ -60,7 +60,7 @@ pub fn pin_e_core() -> crate::Result<()> {
 pub fn pin_any() -> crate::Result<()> {
     let rc = unsafe { pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) };
     if rc != 0 {
-        return Err(RamxError::AffinityFailed(format!(
+        return Err(CpuError::AffinityFailed(format!(
             "pthread_set_qos_class_self_np(DEFAULT) returned {rc}"
         )));
     }

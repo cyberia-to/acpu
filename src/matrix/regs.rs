@@ -4,7 +4,7 @@
 //! Z: 64 rows × 64 bytes = 4096 bytes total. For f32, there are
 //! 4 independent 16×16 tiles selected by `z_row & 3`.
 
-use crate::RamxError;
+use crate::CpuError;
 use core::fmt;
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ impl XRow {
     #[inline]
     pub fn new(index: u8) -> crate::Result<Self> {
         if index > 7 {
-            Err(RamxError::AmxOpFailed(format!(
+            Err(CpuError::AmxOpFailed(format!(
                 "XRow index {index} out of range 0..=7"
             )))
         } else {
@@ -65,7 +65,7 @@ impl YRow {
     #[inline]
     pub fn new(index: u8) -> crate::Result<Self> {
         if index > 7 {
-            Err(RamxError::AmxOpFailed(format!(
+            Err(CpuError::AmxOpFailed(format!(
                 "YRow index {index} out of range 0..=7"
             )))
         } else {
@@ -115,7 +115,7 @@ impl ZRow {
     #[inline]
     pub fn new(index: u8) -> crate::Result<Self> {
         if index > 63 {
-            Err(RamxError::AmxOpFailed(format!(
+            Err(CpuError::AmxOpFailed(format!(
                 "ZRow index {index} out of range 0..=63"
             )))
         } else {

@@ -18,14 +18,14 @@ fn main() {
 
     // Warm up.
     let mut c = vec![0.0f32; M * N];
-    acpu::sgemm(&a, &b, &mut c, M, N, K);
+    acpu::matmul_f32(&a, &b, &mut c, M, N, K);
 
     // Time it.
     let mut times = Vec::new();
     for _ in 0..10 {
         let mut c = vec![0.0f32; M * N];
         let t0 = Instant::now();
-        acpu::sgemm(&a, &b, &mut c, M, N, K);
+        acpu::matmul_f32(&a, &b, &mut c, M, N, K);
         times.push(t0.elapsed());
     }
     times.sort();

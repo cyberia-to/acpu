@@ -15,12 +15,12 @@ fn main() {
     let iters = 500;
 
     // Full sgemm (includes pack + preload + compute + store)
-    acpu::sgemm(&a, &b, &mut c, n, n, k);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, k);
     let mut t = vec![0u64; iters];
     for i in 0..iters {
         c.fill(0.0);
         let s = Instant::now();
-        acpu::sgemm(&a, &b, &mut c, n, n, k);
+        acpu::matmul_f32(&a, &b, &mut c, n, n, k);
         t[i] = s.elapsed().as_nanos() as u64;
     }
     eprintln!(
@@ -35,11 +35,11 @@ fn main() {
         let a2: Vec<f32> = (0..n * kk).map(|i| (i % 7) as f32 * 0.1).collect();
         let b2: Vec<f32> = (0..kk * n).map(|i| (i % 11) as f32 * 0.1).collect();
         let mut c2 = vec![0.0f32; n * n];
-        acpu::sgemm(&a2, &b2, &mut c2, n, n, kk);
+        acpu::matmul_f32(&a2, &b2, &mut c2, n, n, kk);
         for i in 0..iters {
             c2.fill(0.0);
             let s = Instant::now();
-            acpu::sgemm(&a2, &b2, &mut c2, n, n, kk);
+            acpu::matmul_f32(&a2, &b2, &mut c2, n, n, kk);
             t[i] = s.elapsed().as_nanos() as u64;
         }
         let ns = median(&mut t);

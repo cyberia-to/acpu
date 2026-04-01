@@ -15,19 +15,21 @@ pub mod pulse;
 pub mod sync;
 pub mod vector;
 
-pub use convert::{cvt_bf16_f32, cvt_f16_f32, cvt_f32_bf16, cvt_f32_f16, cvt_f32_i8, cvt_i8_f32};
-pub use gemm::{bgemm, hgemm, qgemm, sgemm};
-pub use matrix::AmxCtx;
+pub use convert::{
+    cast_bf16_f32, cast_f16_f32, cast_f32_bf16, cast_f32_f16, cast_f32_i8, cast_i8_f32,
+};
+pub use gemm::{matmul_bf16, matmul_f16, matmul_f32, matmul_i8};
+pub use matrix::Matrix;
 pub use numeric::{bf16, complex, fp16, quant};
-pub use probe::{detect, Caps, Chip, Feature};
-pub use pulse::PulseCtx;
+pub use probe::{scan, Chip, Feature, Features};
+pub use pulse::Counters;
 pub use sync::{affinity, prefetch};
 
 use std::fmt;
 
 /// all acpu errors
 #[derive(Debug)]
-pub enum RamxError {
+pub enum CpuError {
     /// running on non-Apple-Silicon hardware
     ChipNotSupported,
     /// AMX_SET instruction failed
@@ -46,7 +48,7 @@ pub enum RamxError {
     SysctlFailed(String),
 }
 
-impl fmt::Display for RamxError {
+impl fmt::Display for CpuError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ChipNotSupported => write!(f, "not Apple Silicon"),
@@ -61,6 +63,6 @@ impl fmt::Display for RamxError {
     }
 }
 
-impl std::error::Error for RamxError {}
+impl std::error::Error for CpuError {}
 
-pub type Result<T> = std::result::Result<T, RamxError>;
+pub type Result<T> = std::result::Result<T, CpuError>;

@@ -2,7 +2,7 @@
 //!
 //! Uses raw `sysctlbyname` calls — no external dependencies.
 
-use crate::RamxError;
+use crate::CpuError;
 use std::ffi::CStr;
 use std::sync::OnceLock;
 
@@ -184,12 +184,12 @@ pub enum Feature {
 }
 
 // ---------------------------------------------------------------------------
-// Caps struct
+// Features struct
 // ---------------------------------------------------------------------------
 
 /// Detected hardware capabilities (cached, immutable).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Caps {
+pub struct Features {
     pub chip: Chip,
     /// AMX coprocessor version (0 = not detected, 1 = M1/M2, 2 = M3/M4)
     pub amx_ver: u8,
@@ -211,7 +211,7 @@ pub struct Caps {
     pub l2_size: usize,
 }
 
-impl Caps {
+impl Features {
     /// Check whether a given CPU feature is available.
     pub fn has(&self, feat: Feature) -> bool {
         match feat {
@@ -232,7 +232,7 @@ impl Caps {
 // ---------------------------------------------------------------------------
 
 /// Query a sysctl key that returns a `u32`.
-fn sysctl_u32(name: &[u8]) -> Result<u32, RamxError> {
+fn sysctl_u32(name: &[u8]) -> Result<u32, CpuError> {
     let mut val: u32 = 0;
     let mut len = std::mem::size_of::<u32>();
     let rc = unsafe {
@@ -248,13 +248,13 @@ fn sysctl_u32(name: &[u8]) -> Result<u32, RamxError> {
         let key = CStr::from_bytes_with_nul(name)
             .map(|c| c.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("<invalid>"));
-        return Err(RamxError::SysctlFailed(key));
+        return Err(CpuError::SysctlFailed(key));
     }
     Ok(val)
 }
 
 /// Query a sysctl key that returns a `u64`.
-fn sysctl_u64(name: &[u8]) -> Result<u64, RamxError> {
+fn sysctl_u64(name: &[u8]) -> Result<u64, CpuError> {
     let mut val: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     let rc = unsafe {
@@ -270,13 +270,13 @@ fn sysctl_u64(name: &[u8]) -> Result<u64, RamxError> {
         let key = CStr::from_bytes_with_nul(name)
             .map(|c| c.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("<invalid>"));
-        return Err(RamxError::SysctlFailed(key));
+        return Err(CpuError::SysctlFailed(key));
     }
     Ok(val)
 }
 
 /// Query a sysctl key that returns a C string.
-fn sysctl_string(name: &[u8]) -> Result<String, RamxError> {
+fn sysctl_string(name: &[u8]) -> Result<String, CpuError> {
     // First call: get the required buffer length.
     let mut len: usize = 0;
     let rc = unsafe {
@@ -292,7 +292,7 @@ fn sysctl_string(name: &[u8]) -> Result<String, RamxError> {
         let key = CStr::from_bytes_with_nul(name)
             .map(|c| c.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("<invalid>"));
-        return Err(RamxError::SysctlFailed(key));
+        return Err(CpuError::SysctlFailed(key));
     }
 
     let mut buf = vec![0u8; len];
@@ -309,14 +309,14 @@ fn sysctl_string(name: &[u8]) -> Result<String, RamxError> {
         let key = CStr::from_bytes_with_nul(name)
             .map(|c| c.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from("<invalid>"));
-        return Err(RamxError::SysctlFailed(key));
+        return Err(CpuError::SysctlFailed(key));
     }
 
     // Strip trailing NUL.
     if let Some(pos) = buf.iter().position(|&b| b == 0) {
         buf.truncate(pos);
     }
-    String::from_utf8(buf).map_err(|e| RamxError::SysctlFailed(e.to_string()))
+    String::from_utf8(buf).map_err(|e| CpuError::SysctlFailed(e.to_string()))
 }
 
 /// Check a `hw.optional.arm.FEAT_*` flag (returns `false` on any error).
@@ -364,17 +364,17 @@ fn detect_features() -> (bool, bool, bool, bool, bool, bool, bool, bool) {
 // Public API
 // ---------------------------------------------------------------------------
 
-static CAPS: OnceLock<Caps> = OnceLock::new();
+static CAPS: OnceLock<Features> = OnceLock::new();
 
 /// Detect hardware capabilities. The result is computed once and cached for
 /// the lifetime of the process.
-pub fn detect() -> &'static Caps {
+pub fn scan() -> &'static Features {
     CAPS.get_or_init(|| {
         let chip = Chip::detect();
         let amx_ver = chip.amx_version();
         let (fp16, bf16, dotprod, i8mm, fcma, rdm, lse, lrcpc) = detect_features();
 
-        Caps {
+        Features {
             chip,
             amx_ver,
             has_fp16: fp16,
@@ -395,12 +395,12 @@ pub fn detect() -> &'static Caps {
 
 /// Convenience: return the detected chip variant.
 pub fn chip() -> Chip {
-    detect().chip
+    scan().chip
 }
 
 /// Convenience: check whether a CPU feature is available.
 pub fn has(feat: Feature) -> bool {
-    detect().has(feat)
+    scan().has(feat)
 }
 
 // ---------------------------------------------------------------------------
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn caps_has_roundtrip() {
-        let caps = Caps {
+        let caps = Features {
             chip: Chip::M1,
             amx_ver: 1,
             has_fp16: true,
@@ -465,10 +465,10 @@ mod tests {
     }
 
     #[test]
-    fn detect_returns_consistent() {
-        // Calling detect twice must yield the same pointer (OnceLock).
-        let a = detect() as *const Caps;
-        let b = detect() as *const Caps;
+    fn scan_returns_consistent() {
+        // Calling scan twice must yield the same pointer (OnceLock).
+        let a = scan() as *const Features;
+        let b = scan() as *const Features;
         assert_eq!(a, b);
     }
 

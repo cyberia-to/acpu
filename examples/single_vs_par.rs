@@ -11,13 +11,13 @@ fn main() {
         let a: Vec<f32> = (0..sz * sz).map(|i| (i % 7) as f32 * 0.1).collect();
         let b: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
         let mut c = vec![0.0f32; sz * sz];
-        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+        acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
         let iters = if sz >= 1024 { 5 } else { 10 };
         let mut t = vec![0u64; iters];
         for i in 0..iters {
             c.fill(0.0);
             let s = Instant::now();
-            acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+            acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
             t[i] = s.elapsed().as_nanos() as u64;
         }
         let ns = median(&mut t);

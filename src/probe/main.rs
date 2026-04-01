@@ -10,7 +10,7 @@ fn main() {
     // Level 1: Capabilities
     // -----------------------------------------------------------------------
     println!("[1] Capabilities");
-    let caps = acpu::probe::detect();
+    let caps = acpu::probe::scan();
     println!("  chip:       {}", caps.chip);
     println!("  AMX ver:    {}", caps.amx_ver);
     println!("  P-cores:    {}", caps.p_cores);
@@ -56,11 +56,11 @@ fn main() {
     println!();
 
     // -----------------------------------------------------------------------
-    // Level 4: NEON math (sgemm)
+    // Level 4: NEON math (matmul_f32)
     // -----------------------------------------------------------------------
-    println!("[4] NEON sgemm");
-    match neon_sgemm_test() {
-        Ok(()) => println!("  PASS: 4x4 sgemm correct"),
+    println!("[4] NEON matmul_f32");
+    match neon_matmul_f32_test() {
+        Ok(()) => println!("  PASS: 4x4 matmul_f32 correct"),
         Err(e) => println!("  FAIL: {e}"),
     }
     println!();
@@ -117,7 +117,7 @@ fn amx_fma_test() -> Result<(), String> {
     struct ZBuf([u8; 512]); // 8 × 64 bytes
     let mut z_all = ZBuf([0u8; 512]);
 
-    let ctx = acpu::AmxCtx::new().map_err(|e| format!("{e}"))?;
+    let ctx = acpu::Matrix::new().map_err(|e| format!("{e}"))?;
 
     unsafe {
         use acpu::matrix::regs::*;
@@ -156,7 +156,7 @@ fn amx_fma_test() -> Result<(), String> {
     Ok(())
 }
 
-fn neon_sgemm_test() -> Result<(), String> {
+fn neon_matmul_f32_test() -> Result<(), String> {
     const N: usize = 4;
     // A = [[1,2,3,4],[5,6,7,8],[9,10,11,12],[13,14,15,16]]
     let a: Vec<f32> = (1..=16).map(|i| i as f32).collect();
@@ -167,7 +167,7 @@ fn neon_sgemm_test() -> Result<(), String> {
     }
     let mut c = vec![0.0f32; N * N];
 
-    acpu::sgemm(&a, &b, &mut c, N, N, N);
+    acpu::matmul_f32(&a, &b, &mut c, N, N, N);
 
     for i in 0..N * N {
         if (c[i] - a[i]).abs() > 1e-4 {
@@ -181,10 +181,10 @@ fn neon_sgemm_test() -> Result<(), String> {
 }
 
 fn pmu_test() -> Result<(), String> {
-    use acpu::pulse::{Counter, PulseCtx};
+    use acpu::pulse::{Counter, Counters};
 
     let mut ctx =
-        PulseCtx::new(&[Counter::Cycles, Counter::Instructions]).map_err(|e| format!("{e}"))?;
+        Counters::new(&[Counter::Cycles, Counter::Instructions]).map_err(|e| format!("{e}"))?;
 
     ctx.start();
     let a = ctx.read();

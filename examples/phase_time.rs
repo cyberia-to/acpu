@@ -14,14 +14,14 @@ fn main() {
         let iters = 100;
 
         // Warmup
-        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+        acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
 
         // Total sgemm time
         let mut t = vec![0u64; iters];
         for i in 0..iters {
             c.fill(0.0);
             let s = Instant::now();
-            acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+            acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
             t[i] = s.elapsed().as_nanos() as u64;
         }
         let total = median_of(&mut t);

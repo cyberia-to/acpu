@@ -5,7 +5,7 @@
 //! rows of 64 bytes each, plus a set of fused multiply-accumulate
 //! instructions that operate on these registers.
 //!
-//! [`AmxCtx`] is the safe entry point: constructing one calls AMX_SET,
+//! [`Matrix`] is the safe entry point: constructing one calls AMX_SET,
 //! and dropping it calls AMX_CLR.
 
 pub mod asm;
@@ -20,29 +20,29 @@ use core::marker::PhantomData;
 
 /// A live AMX coprocessor context.
 ///
-/// Creating an `AmxCtx` activates the AMX unit on the current thread
+/// Creating an `Matrix` activates the AMX unit on the current thread
 /// (AMX_SET). Dropping it deactivates the unit (AMX_CLR). The type is
 /// `!Send` and `!Sync` because AMX state is per-thread.
 ///
 /// All AMX operations are methods on this struct, ensuring at compile
 /// time that the coprocessor is active.
-pub struct AmxCtx {
+pub struct Matrix {
     /// `PhantomData<*const ()>` makes the type `!Send + !Sync`.
     _not_send_sync: PhantomData<*const ()>,
 }
 
-impl AmxCtx {
+impl Matrix {
     /// Activate the AMX coprocessor on the current thread.
     ///
     /// # Errors
     ///
-    /// Returns [`RamxError::AmxSetFailed`] if the current hardware does
+    /// Returns [`CpuError::AmxSetFailed`] if the current hardware does
     /// not support AMX (non-Apple-Silicon or virtualised without AMX
     /// passthrough).
     ///
     /// # Safety
     ///
-    /// Only one `AmxCtx` should be live per thread at a time. Creating
+    /// Only one `Matrix` should be live per thread at a time. Creating
     /// a second one is not undefined behaviour but wastes a SET/CLR
     /// pair and the register state from the first context becomes
     /// shared, which is confusing.
@@ -62,7 +62,7 @@ impl AmxCtx {
     }
 }
 
-impl Drop for AmxCtx {
+impl Drop for Matrix {
     #[inline]
     fn drop(&mut self) {
         unsafe {

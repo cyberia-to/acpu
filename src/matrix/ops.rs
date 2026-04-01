@@ -1,13 +1,13 @@
-//! Safe(ish) AMX operations that require a live [`AmxCtx`].
+//! Safe(ish) AMX operations that require a live [`Matrix`].
 //!
-//! Every function here takes `&self` on `AmxCtx` so the borrow checker
+//! Every function here takes `&self` on `Matrix` so the borrow checker
 //! guarantees the coprocessor is active for the duration of the call.
 
 use super::asm::{
     self, OP_FMA16, OP_FMA32, OP_LDX, OP_LDY, OP_LDZ, OP_LDZI, OP_MAC16, OP_STX, OP_STY, OP_STZ,
 };
 use super::regs::{XRow, YRow, ZRow};
-use super::AmxCtx;
+use super::Matrix;
 
 // ---------------------------------------------------------------------------
 // Operand packing helpers
@@ -24,7 +24,7 @@ fn load_store_operand(ptr: *const u8, row: u8) -> u64 {
 // Load operations
 // ---------------------------------------------------------------------------
 
-impl AmxCtx {
+impl Matrix {
     /// Load 64 bytes from `src` into X-register row `row`.
     ///
     /// # Safety

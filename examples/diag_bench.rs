@@ -8,12 +8,12 @@ fn main() {
     let mut c = vec![0.0f32; n * n];
 
     eprintln!("starting warmup...");
-    acpu::sgemm(&a, &b, &mut c, n, n, n);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, n);
     eprintln!("warmup done");
 
     c.fill(0.0);
     let t = Instant::now();
-    acpu::sgemm(&a, &b, &mut c, n, n, n);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, n);
     let ns = t.elapsed().as_nanos();
     eprintln!("16x16 sgemm: {} ns", ns);
 
@@ -22,10 +22,10 @@ fn main() {
     let b: Vec<f32> = (0..n * n).map(|i| (i % 11) as f32 * 0.1).collect();
     let mut c = vec![0.0f32; n * n];
 
-    acpu::sgemm(&a, &b, &mut c, n, n, n);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, n);
     c.fill(0.0);
     let t = Instant::now();
-    acpu::sgemm(&a, &b, &mut c, n, n, n);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, n);
     let ns = t.elapsed().as_nanos();
     eprintln!("64x64 sgemm: {} ns", ns);
 
@@ -34,10 +34,10 @@ fn main() {
     let b: Vec<f32> = (0..n * n).map(|i| (i % 11) as f32 * 0.1).collect();
     let mut c = vec![0.0f32; n * n];
 
-    acpu::sgemm(&a, &b, &mut c, n, n, n);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, n);
     c.fill(0.0);
     let t = Instant::now();
-    acpu::sgemm(&a, &b, &mut c, n, n, n);
+    acpu::matmul_f32(&a, &b, &mut c, n, n, n);
     let ns = t.elapsed().as_nanos();
     eprintln!("256x256 sgemm: {} ns", ns);
     eprintln!("done");

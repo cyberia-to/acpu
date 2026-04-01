@@ -5,7 +5,7 @@
 use acpu::matrix::asm::{amx_op, OP_FMA32, OP_LDX, OP_LDY, OP_LDZ, OP_STZ};
 use acpu::matrix::fma::{fma_acc, fma_first};
 use acpu::matrix::regs::{XRow, YRow};
-use acpu::AmxCtx;
+use acpu::Matrix;
 
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 
@@ -22,7 +22,7 @@ unsafe fn free_f32(ptr: *mut f32, n: usize) {
 fn main() {
     println!("=== AMX fma32 verification ===\n");
 
-    let _ctx = AmxCtx::new().expect("AMX not available");
+    let _ctx = Matrix::new().expect("AMX not available");
     let mut all_pass = true;
 
     unsafe {

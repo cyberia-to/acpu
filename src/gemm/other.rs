@@ -1,4 +1,4 @@
-//! Non-f32 GEMM variants: hgemm (fp16), bgemm (bf16), qgemm (int8).
+//! Non-f32 GEMM variants: matmul_f16 (fp16), matmul_bf16 (bf16), matmul_i8 (int8).
 //!
 //! Scalar reference implementations. AMX-accelerated versions planned.
 
@@ -7,7 +7,7 @@
 /// # Panics
 ///
 /// Panics if slice lengths do not match dimensions.
-pub fn hgemm(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
+pub fn matmul_f16(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
     assert_eq!(a.len(), m * k);
     assert_eq!(b.len(), k * n);
     assert_eq!(c.len(), m * n);
@@ -26,7 +26,7 @@ pub fn hgemm(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) 
 }
 
 /// BFloat16 matrix multiply: C += A × B (bf16 in, fp32 accum).
-pub fn bgemm(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
+pub fn matmul_bf16(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
     assert_eq!(a.len(), m * k);
     assert_eq!(b.len(), k * n);
     assert_eq!(c.len(), m * n);
@@ -46,7 +46,7 @@ pub fn bgemm(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) 
 
 /// Int8 quantised matrix multiply: C += scale × (A - zero) × (B - zero).
 #[allow(clippy::too_many_arguments)]
-pub fn qgemm(
+pub fn matmul_i8(
     a: &[i8],
     b: &[i8],
     c: &mut [f32],
@@ -77,11 +77,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn qgemm_basic() {
+    fn matmul_i8_basic() {
         let a: Vec<i8> = vec![1, 2, 3, 4];
         let b: Vec<i8> = vec![1, 0, 0, 1];
         let mut c = vec![0.0f32; 4];
-        qgemm(&a, &b, &mut c, 2, 2, 2, 1.0, 0);
+        matmul_i8(&a, &b, &mut c, 2, 2, 2, 1.0, 0);
         assert!((c[0] - 1.0).abs() < 1e-5);
         assert!((c[1] - 2.0).abs() < 1e-5);
         assert!((c[2] - 3.0).abs() < 1e-5);

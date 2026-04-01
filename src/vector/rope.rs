@@ -15,12 +15,12 @@ use core::arch::aarch64::*;
 ///   theta = pos * f
 ///   out[2*i]   = x0 * cos(theta) - x1 * sin(theta)
 ///   out[2*i+1] = x0 * sin(theta) + x1 * cos(theta)
-pub fn rope(out: &mut [f32], x: &[f32], freqs: &[f32], pos: usize) {
+pub fn rotate(out: &mut [f32], x: &[f32], freqs: &[f32], pos: usize) {
     let dim = x.len();
-    assert!(dim % 2 == 0, "rope: dimension must be even");
+    assert!(dim % 2 == 0, "rotate: dimension must be even");
     let n_pairs = dim / 2;
-    assert!(freqs.len() >= n_pairs, "rope: not enough frequencies");
-    assert!(out.len() >= dim, "rope: output buffer too small");
+    assert!(freqs.len() >= n_pairs, "rotate: not enough frequencies");
+    assert!(out.len() >= dim, "rotate: output buffer too small");
 
     let pos_f = pos as f32;
     let mut i = 0; // pair index
@@ -97,7 +97,7 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let freqs = vec![0.1, 0.01, 0.001, 0.0001];
         let mut out = vec![0.0; 8];
-        rope(&mut out, &x, &freqs, 0);
+        rotate(&mut out, &x, &freqs, 0);
         for i in 0..x.len() {
             assert!(
                 (out[i] - x[i]).abs() < 1e-5,
@@ -115,7 +115,7 @@ mod tests {
         let x = vec![3.0, 4.0, 1.0, 0.0];
         let freqs = vec![1.0, 2.0];
         let mut out = vec![0.0; 4];
-        rope(&mut out, &x, &freqs, 7);
+        rotate(&mut out, &x, &freqs, 7);
 
         let norm_in_0 = (x[0] * x[0] + x[1] * x[1]).sqrt();
         let norm_out_0 = (out[0] * out[0] + out[1] * out[1]).sqrt();
@@ -144,7 +144,7 @@ mod tests {
         let pos = 1;
         let theta = pos as f32 * freq;
         let mut out = vec![0.0; 2];
-        rope(&mut out, &x, &[freq], pos);
+        rotate(&mut out, &x, &[freq], pos);
         assert!((out[0] - theta.cos()).abs() < 1e-5);
         assert!((out[1] - theta.sin()).abs() < 1e-5);
     }
@@ -155,7 +155,7 @@ mod tests {
         let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let freqs = vec![0.5, 1.0, 1.5];
         let mut out = vec![0.0; 6];
-        rope(&mut out, &x, &freqs, 3);
+        rotate(&mut out, &x, &freqs, 3);
         // Just verify norms are preserved
         for p in 0..3 {
             let ni = (x[2 * p] * x[2 * p] + x[2 * p + 1] * x[2 * p + 1]).sqrt();

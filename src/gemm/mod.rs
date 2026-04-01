@@ -3,13 +3,13 @@
 //! All functions compute C += A × B in row-major order:
 //!   A is m×k, B is k×n, C is m×n.
 //!
-//! `sgemm` uses AMX 16×16 microkernel with GEBP cache blocking,
+//! `matmul_f32` uses AMX 16×16 microkernel with GEBP cache blocking,
 //! parallel across P-cores, falling back to scalar.
 
 mod other;
 mod small;
 
-pub use other::{bgemm, hgemm, qgemm};
+pub use other::{matmul_bf16, matmul_f16, matmul_i8};
 
 use crate::matrix;
 
@@ -24,13 +24,13 @@ const NR: usize = 16;
 pub(super) const MC: usize = 64;
 
 // ---------------------------------------------------------------------------
-// Thread-local pack buffer cache — keep buffers warm across sgemm calls
+// Thread-local pack buffer cache — keep buffers warm across matmul_f32 calls
 // ---------------------------------------------------------------------------
 
 thread_local! {
     static PACK_CACHE: RefCell<PackCache> = const { RefCell::new(PackCache { a: None, b: None }) };
     /// Persistent AMX context — set once per thread, never cleared.
-    /// Saves 40ns per sgemm call (AMX_SET + AMX_CLR overhead).
+    /// Saves 40ns per matmul_f32 call (AMX_SET + AMX_CLR overhead).
     static AMX_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -120,14 +120,14 @@ impl Drop for AlignedBuf {
 }
 
 // ---------------------------------------------------------------------------
-// sgemm — f32 matmul
+// matmul_f32 — f32 matmul
 // ---------------------------------------------------------------------------
 
 /// Single-precision matrix multiply: C += A × B.
 ///
 /// Row-major: A[m×k], B[k×n], C[m×n].
 /// Parallelizes across M dimension using P-core threads when beneficial.
-pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     assert_eq!(a.len(), m * k, "a.len() must equal m*k");
     assert_eq!(b.len(), k * n, "b.len() must equal k*n");
     assert_eq!(c.len(), m * n, "c.len() must equal m*n");
@@ -138,33 +138,33 @@ pub fn sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) 
         // NEON 4×16 microkernel beats AMX for sizes < 32 (packing overhead
         // dominates). AMX pair32 wins at 32+ with full tile utilization.
         if m < 2 * MR || n < 2 * NR {
-            sgemm_neon(a, b, c, m, n, k);
+            matmul_f32_neon(a, b, c, m, n, k);
             return;
         }
         // Small matrices: direct AMX, no B packing (stride LDX).
         // B fits in L1 when n*k*4 ≤ 128KB.
         if n * k <= 32768 {
-            small::sgemm_amx_direct(a, b, c, m, n, k);
+            small::matmul_f32_amx_direct(a, b, c, m, n, k);
         } else {
-            let p_cores = crate::probe::detect().p_cores as usize;
+            let p_cores = crate::probe::scan().p_cores as usize;
             let max_threads = if m >= MR { m / MR } else { 1 };
             let n_threads = p_cores.max(1).min(max_threads);
             if n_threads > 1 && flops > 200_000_000 {
-                sgemm_parallel(a, b, c, m, n, k, n_threads);
+                matmul_f32_parallel(a, b, c, m, n, k, n_threads);
             } else {
-                sgemm_amx_single(a, b, c, m, n, k);
+                matmul_f32_amx_single(a, b, c, m, n, k);
             }
         }
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
-        sgemm_scalar(a, b, c, m, n, k);
+        matmul_f32_scalar(a, b, c, m, n, k);
     }
 }
 
-/// Parallel sgemm: pre-pack all B, spawn threads once, shared B access.
+/// Parallel matmul_f32: pre-pack all B, spawn threads once, shared B access.
 #[cfg(target_arch = "aarch64")]
-fn sgemm_parallel(
+fn matmul_f32_parallel(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],
@@ -263,9 +263,9 @@ fn sgemm_parallel(
     });
 }
 
-/// Single-threaded AMX sgemm (full GEBP).
+/// Single-threaded AMX matmul_f32 (full GEBP).
 #[cfg(target_arch = "aarch64")]
-fn sgemm_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+fn matmul_f32_amx_single(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     ensure_amx();
 
     // L1 constraint: KC × (MR+NR) × 4 ≤ L1D (64KB).
@@ -719,13 +719,13 @@ fn edge_kernel(
 // Fallbacks
 // ---------------------------------------------------------------------------
 
-/// NEON sgemm for small matrices.
+/// NEON matmul_f32 for small matrices.
 ///
 /// 4×16 microkernel: 4 rows × 16 columns, 16 NEON accumulators.
 /// Each k step: 1 A scalar broadcast × 4 B loads = 4 FMA per row = 16 FMA total.
 /// 16 accumulators saturate NEON FMA throughput (4-cycle latency, 2 pipes).
 #[cfg(target_arch = "aarch64")]
-fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+fn matmul_f32_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     use core::arch::aarch64::*;
     unsafe {
         let mut i = 0;
@@ -859,7 +859,7 @@ fn sgemm_neon(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize)
 }
 
 #[allow(dead_code)]
-fn sgemm_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
+fn matmul_f32_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     for i in 0..m {
         for j in 0..n {
             let mut acc = 0.0f32;
@@ -880,7 +880,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sgemm_identity() {
+    fn matmul_f32_identity() {
         const N: usize = 64;
         let mut a = vec![0.0f32; N * N];
         let mut b = vec![0.0f32; N * N];
@@ -893,7 +893,7 @@ mod tests {
             b[i * N + i] = 1.0;
         }
 
-        sgemm(&a, &b, &mut c, N, N, N);
+        matmul_f32(&a, &b, &mut c, N, N, N);
 
         for i in 0..N {
             for j in 0..N {
@@ -907,21 +907,21 @@ mod tests {
     }
 
     #[test]
-    fn sgemm_small() {
+    fn matmul_f32_small() {
         const N: usize = 4;
         let a: Vec<f32> = (1..=16).map(|x| x as f32).collect();
         let b = vec![
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let mut c = vec![0.0f32; 16];
-        sgemm(&a, &b, &mut c, N, N, N);
+        matmul_f32(&a, &b, &mut c, N, N, N);
         for i in 0..16 {
             assert!((c[i] - a[i]).abs() < 1e-5);
         }
     }
 
     #[test]
-    fn sgemm_vs_naive() {
+    fn matmul_f32_vs_naive() {
         const M: usize = 33;
         const N: usize = 35;
         const K: usize = 31;
@@ -930,8 +930,8 @@ mod tests {
         let mut c_amx = vec![0.0f32; M * N];
         let mut c_ref = vec![0.0f32; M * N];
 
-        sgemm(&a, &b, &mut c_amx, M, N, K);
-        sgemm_scalar(&a, &b, &mut c_ref, M, N, K);
+        matmul_f32(&a, &b, &mut c_amx, M, N, K);
+        matmul_f32_scalar(&a, &b, &mut c_ref, M, N, K);
 
         for i in 0..M * N {
             assert!(
@@ -944,7 +944,7 @@ mod tests {
     }
 
     #[test]
-    fn sgemm_large_parallel() {
+    fn matmul_f32_large_parallel() {
         const M: usize = 256;
         const N: usize = 256;
         const K: usize = 256;
@@ -953,8 +953,8 @@ mod tests {
         let mut c_par = vec![0.0f32; M * N];
         let mut c_ref = vec![0.0f32; M * N];
 
-        sgemm(&a, &b, &mut c_par, M, N, K);
-        sgemm_scalar(&a, &b, &mut c_ref, M, N, K);
+        matmul_f32(&a, &b, &mut c_par, M, N, K);
+        matmul_f32_scalar(&a, &b, &mut c_ref, M, N, K);
 
         let mut max_err = 0.0f32;
         for i in 0..M * N {
@@ -963,6 +963,9 @@ mod tests {
                 max_err = err;
             }
         }
-        assert!(max_err < 0.1, "parallel sgemm 256x256: max_err={max_err}");
+        assert!(
+            max_err < 0.1,
+            "parallel matmul_f32 256x256: max_err={max_err}"
+        );
     }
 }

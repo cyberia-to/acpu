@@ -14,24 +14,24 @@ fn main() {
     let t0 = Instant::now();
     for _ in 0..ITERS {
         c.fill(0.0);
-        acpu::sgemm(&a, &b, &mut c, N, N, N);
+        acpu::matmul_f32(&a, &b, &mut c, N, N, N);
     }
     let sgemm_ns = t0.elapsed().as_nanos() / ITERS as u128;
     println!("sgemm 64x64:         {} ns", sgemm_ns);
 
-    // 2. Just AmxCtx new/drop.
+    // 2. Just Matrix new/drop.
     let t0 = Instant::now();
     for _ in 0..ITERS {
-        let ctx = acpu::AmxCtx::new().unwrap();
+        let ctx = acpu::Matrix::new().unwrap();
         drop(ctx);
     }
     let ctx_ns = t0.elapsed().as_nanos() / ITERS as u128;
-    println!("AmxCtx new+drop:     {} ns", ctx_ns);
+    println!("Matrix new+drop:     {} ns", ctx_ns);
 
     // 3. detect() call.
     let t0 = Instant::now();
     for _ in 0..ITERS {
-        let _ = acpu::detect();
+        let _ = acpu::scan();
     }
     let detect_ns = t0.elapsed().as_nanos() / ITERS as u128;
     println!("detect() cached:     {} ns", detect_ns);

@@ -2,11 +2,11 @@
 //!
 //! Requires running as root **or** with the `dtrace_proc` entitlement
 //! (the Instruments profiler uses the same mechanism).  On stock macOS
-//! without SIP changes this will fail with [`crate::RamxError::PmuNotAvailable`].
+//! without SIP changes this will fail with [`crate::CpuError::PmuNotAvailable`].
 
 pub mod ffi;
 
-use crate::RamxError;
+use crate::CpuError;
 use ffi::{KPC_CLASS_CONFIGURABLE, KPC_CLASS_FIXED};
 
 // ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ fn event_selector(c: Counter) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// PulseCtx
+// Counters
 // ---------------------------------------------------------------------------
 
 /// Handle to an active PMU counting session.
@@ -83,9 +83,9 @@ fn event_selector(c: Counter) -> u64 {
 /// # Example
 ///
 /// ```no_run
-/// use acpu::pulse::{Counter, PulseCtx};
+/// use acpu::pulse::{Counter, Counters};
 ///
-/// let mut ctx = PulseCtx::new(&[Counter::Cycles, Counter::Instructions]).unwrap();
+/// let mut ctx = Counters::new(&[Counter::Cycles, Counter::Instructions]).unwrap();
 /// ctx.start();
 /// // ... workload ...
 /// let a = ctx.read();
@@ -95,7 +95,7 @@ fn event_selector(c: Counter) -> u64 {
 /// let c = ctx.elapsed(&a, &b);
 /// println!("IPC = {:.2}", c.instructions as f64 / c.cycles as f64);
 /// ```
-pub struct PulseCtx {
+pub struct Counters {
     classes: u32,
     counter_count: u32,
     /// Which of our Counter variants are active, in order.
@@ -104,13 +104,13 @@ pub struct PulseCtx {
     hw_indices: Vec<usize>,
 }
 
-impl PulseCtx {
+impl Counters {
     /// Configure the PMU with the requested counters.
     ///
     /// The first two fixed counters (cycles, instructions) are always
     /// enabled.  Additional counters use the configurable PMU slots.
     pub fn new(counters: &[Counter]) -> crate::Result<Self> {
-        let vt = ffi::vtable().map_err(|_| RamxError::PmuNotAvailable)?;
+        let vt = ffi::vtable().map_err(|_| CpuError::PmuNotAvailable)?;
 
         let classes = KPC_CLASS_FIXED | KPC_CLASS_CONFIGURABLE;
         let n_counters = unsafe { (vt.get_counter_count)(classes) };
@@ -140,7 +140,7 @@ impl PulseCtx {
                 }
                 _ => {
                     if n_fixed + cfg_slot >= n_counters as usize {
-                        return Err(RamxError::PmuConfigFailed(
+                        return Err(CpuError::PmuConfigFailed(
                             "not enough configurable PMU slots".into(),
                         ));
                     }
@@ -156,7 +156,7 @@ impl PulseCtx {
 
         let rc = unsafe { (vt.set_config)(classes, config.as_ptr()) };
         if rc != 0 {
-            return Err(RamxError::PmuConfigFailed(format!(
+            return Err(CpuError::PmuConfigFailed(format!(
                 "kpc_set_config returned {rc}"
             )));
         }

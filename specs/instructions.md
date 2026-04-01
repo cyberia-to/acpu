@@ -73,12 +73,12 @@ ARM Advanced SIMD. 32 registers × 128 bits. 4-wide f32 or 2-wide f64.
 | `vsubq_f32` | subtract | 1/cycle | — |
 | `vmulq_f32` | multiply | 1/cycle | math kernels |
 | `vdivq_f32` | divide | ~10 cycles | softmax |
-| `vsqrtq_f32` | square root | ~10 cycles | rmsnorm |
+| `vsqrtq_f32` | square root | ~10 cycles | normalize |
 | `vmaxq_f32` / `vminq_f32` | max/min | 1/cycle | reduce |
 | `vabsq_f32` | absolute | 1/cycle | — |
 | `vnegq_f32` | negate | 1/cycle | — |
 | `vrecpeq_f32` + `vrecpsq_f32` | reciprocal estimate | 2 cycles | softmax fast path |
-| `vrsqrteq_f32` + `vrsqrtsq_f32` | rsqrt estimate | 2 cycles | rmsnorm fast path |
+| `vrsqrteq_f32` + `vrsqrtsq_f32` | rsqrt estimate | 2 cycles | normalize fast path |
 
 ### Load / Store
 
@@ -98,8 +98,8 @@ ARM Advanced SIMD. 32 registers × 128 bits. 4-wide f32 or 2-wide f64.
 | `vzip2q_f32` | interleave high halves | pack_a NEON 4×4 transpose |
 | `vtrn1q_f32` | transpose even elements | — |
 | `vtrn2q_f32` | transpose odd elements | — |
-| `vextq_f32` | extract/rotate | rope |
-| `vrev64q_f32` | reverse within 64-bit | rope |
+| `vextq_f32` | extract/rotate | rotate |
+| `vrev64q_f32` | reverse within 64-bit | rotate |
 
 ### Reduction (horizontal)
 
@@ -240,11 +240,11 @@ All available as `Ordering::Relaxed/Acquire/Release/SeqCst` via
 
 | Instruction | Function | Description |
 |-------------|---------|-------------|
-| DMB ISH | `dmb_ish()` | data memory barrier (inner shareable) |
-| DSB ISH | `dsb_ish()` | data synchronization barrier |
+| DMB ISH | `barrier()` | data memory barrier (inner shareable) |
+| DSB ISH | `fence()` | data synchronization barrier |
 | ISB | `isb()` | instruction synchronization barrier |
-| WFE | `wfe()` | wait for event (low-power sleep) |
-| SEV | `sev()` | signal event (wake all cores in cluster) |
+| WFE | `wait()` | wait for event (low-power sleep) |
+| SEV | `wake()` | signal event (wake all cores in cluster) |
 
 WFE/SEV pair: lightweight cross-core signaling without mutex overhead.
 

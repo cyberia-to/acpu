@@ -64,7 +64,7 @@ fn decompose(n: usize) {
     let mut c = vec![0.0f32; n * n];
     let sgemm_ns = median_ns(|| {
         c.fill(0.0);
-        acpu::sgemm(&a, &b, &mut c, n, n, n);
+        acpu::matmul_f32(&a, &b, &mut c, n, n, n);
         std::hint::black_box(&c);
     });
 
@@ -94,7 +94,7 @@ fn decompose(n: usize) {
 
     // --- AMX set+clr ---
     let setclr_ns = median_ns(|| {
-        let ctx = acpu::AmxCtx::new().unwrap();
+        let ctx = acpu::Matrix::new().unwrap();
         std::hint::black_box(&ctx);
         drop(ctx);
     });

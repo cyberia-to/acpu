@@ -6,7 +6,7 @@
 //! Run with: `cargo run --example amx_reverse --release`
 
 use acpu::matrix::asm::{amx_op, OP_LDX, OP_LDY, OP_LDZ, OP_STX, OP_STY, OP_STZ};
-use acpu::AmxCtx;
+use acpu::Matrix;
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 
 unsafe fn aligned_f32(n: usize) -> *mut f32 {
@@ -133,7 +133,7 @@ impl Snapshot {
 fn main() {
     println!("=== AMX Full Reverse Engineering ===\n");
 
-    let _ctx = AmxCtx::new().expect("AMX not available");
+    let _ctx = Matrix::new().expect("AMX not available");
 
     unsafe {
         let buf = aligned_f32(16);

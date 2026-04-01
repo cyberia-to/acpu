@@ -22,7 +22,7 @@ pub mod prefetch;
 /// barriers can hide data races.  The caller must understand the intended
 /// ordering guarantee.
 #[inline(always)]
-pub unsafe fn dmb_ish() {
+pub unsafe fn barrier() {
     #[cfg(target_arch = "aarch64")]
     {
         core::arch::asm!("dmb ish", options(nostack, preserves_flags));
@@ -40,9 +40,9 @@ pub unsafe fn dmb_ish() {
 ///
 /// # Safety
 ///
-/// See [`dmb_ish`].
+/// See [`barrier`].
 #[inline(always)]
-pub unsafe fn dsb_ish() {
+pub unsafe fn fence() {
     #[cfg(target_arch = "aarch64")]
     {
         core::arch::asm!("dsb ish", options(nostack, preserves_flags));
@@ -60,7 +60,7 @@ pub unsafe fn dsb_ish() {
 ///
 /// # Safety
 ///
-/// See [`dmb_ish`].
+/// See [`barrier`].
 #[inline(always)]
 pub unsafe fn isb() {
     #[cfg(target_arch = "aarch64")]
@@ -82,7 +82,7 @@ pub unsafe fn isb() {
 ///
 /// Must only be used in contexts where stalling the core is acceptable.
 #[inline(always)]
-pub unsafe fn wfe() {
+pub unsafe fn wait() {
     #[cfg(target_arch = "aarch64")]
     {
         core::arch::asm!("wfe", options(nostack, preserves_flags));
@@ -100,10 +100,10 @@ pub unsafe fn wfe() {
 ///
 /// # Safety
 ///
-/// Benign in isolation, but incorrect pairing with [`wfe`] can cause
+/// Benign in isolation, but incorrect pairing with [`wait`] can cause
 /// live-locks or missed wake-ups.
 #[inline(always)]
-pub unsafe fn sev() {
+pub unsafe fn wake() {
     #[cfg(target_arch = "aarch64")]
     {
         core::arch::asm!("sev", options(nostack, preserves_flags));

@@ -1,4 +1,4 @@
-//! Benchmark acpu::sgemm vs Apple Accelerate cblas_sgemm.
+//! Benchmark acpu::matmul_f32 vs Apple Accelerate cblas_sgemm.
 //!
 //! Run with: `cargo run --example bench_sgemm --release`
 
@@ -73,7 +73,7 @@ fn main() {
         // -- acpu --
         let acpu_dur = bench_median(|| {
             let mut c = vec![0.0f32; m * n];
-            acpu::sgemm(&a, &b, &mut c, m, n, k);
+            acpu::matmul_f32(&a, &b, &mut c, m, n, k);
             std::hint::black_box(&c);
         });
 

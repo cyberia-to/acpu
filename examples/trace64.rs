@@ -149,7 +149,7 @@ fn main() {
 
     // 4. AMX set + clr
     let t_setclr = median_ns(|| {
-        let ctx = acpu::AmxCtx::new().unwrap();
+        let ctx = acpu::Matrix::new().unwrap();
         std::hint::black_box(&ctx);
         drop(ctx);
     });
@@ -242,7 +242,7 @@ fn main() {
     // 7. Actual sgemm
     let t_sgemm = median_ns(|| {
         c_buf.fill(0.0);
-        acpu::sgemm(&a, &b, &mut c_buf, N, N, N);
+        acpu::matmul_f32(&a, &b, &mut c_buf, N, N, N);
         std::hint::black_box(&c_buf);
     });
 

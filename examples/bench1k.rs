@@ -55,14 +55,14 @@ fn main() {
     let b: Vec<f32> = (0..N * N).map(|_| randf()).collect();
     let mut c = vec![0.0f32; N * N];
 
-    let caps = acpu::detect();
+    let caps = acpu::scan();
     println!("chip: {}, p_cores: {}", caps.chip, caps.p_cores);
     println!("matrix: {}×{}\n", N, N);
 
     // acpu sgemm (auto-dispatch: may use parallel)
     let dur_acpu = bench_median(|| {
         c.fill(0.0);
-        acpu::sgemm(&a, &b, &mut c, N, N, N);
+        acpu::matmul_f32(&a, &b, &mut c, N, N, N);
         std::hint::black_box(&c);
     });
 

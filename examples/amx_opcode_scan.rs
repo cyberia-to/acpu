@@ -3,7 +3,7 @@
 //! Run with: `cargo run --example amx_opcode_scan --release`
 
 use acpu::matrix::asm::{amx_op, OP_LDX, OP_LDY, OP_LDZ, OP_STZ};
-use acpu::AmxCtx;
+use acpu::Matrix;
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 
 unsafe fn aligned_f32(n: usize) -> *mut f32 {
@@ -19,7 +19,7 @@ unsafe fn free_f32(ptr: *mut f32, n: usize) {
 fn main() {
     println!("=== AMX opcode scan (18-31) ===\n");
 
-    let _ctx = AmxCtx::new().expect("AMX not available");
+    let _ctx = Matrix::new().expect("AMX not available");
 
     unsafe {
         let x_buf = aligned_f32(16);

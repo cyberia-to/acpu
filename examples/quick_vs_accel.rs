@@ -73,12 +73,12 @@ fn main() {
     for &(sz, iters) in SIZES {
         let (a, b) = make_matrices(sz);
         let mut c = vec![0.0f32; sz * sz];
-        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+        acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
         let mut t = vec![0u64; iters];
         for i in 0..iters {
             c.fill(0.0);
             let s = Instant::now();
-            acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+            acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
             t[i] = s.elapsed().as_nanos() as u64;
         }
         acpu_results.push((sz, median_of(&mut t)));

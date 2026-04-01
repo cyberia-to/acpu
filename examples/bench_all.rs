@@ -153,7 +153,7 @@ fn main() {
         std::process::exit(0);
     });
 
-    let caps = acpu::probe::detect();
+    let caps = acpu::probe::scan();
     eprintln!(
         "=== acpu CPU driver benchmark — {:?} ({}P+{}E) ===",
         caps.chip, caps.p_cores, caps.e_cores
@@ -390,7 +390,7 @@ fn main() {
                     let b: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
                     move || {
                         let mut c = vec![0f32; sz * sz];
-                        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+                        acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
                         std::hint::black_box(&c);
                     }
                 }),
@@ -606,9 +606,9 @@ fn main() {
         }),
     );
     row(
-        "norm_l2",
+        "length",
         ns(|| {
-            std::hint::black_box(acpu::vector::reduce::norm_l2(&src));
+            std::hint::black_box(acpu::vector::reduce::length(&src));
         }),
         ns(|| unsafe {
             std::hint::black_box(cblas_snrm2(nn, src.as_ptr(), 1));
@@ -657,11 +657,11 @@ fn main() {
     );
     let w: Vec<f32> = (0..n).map(|i| (i % 13) as f32 * 0.1).collect();
     let mut rm = vec![0f32; n];
-    acpu::vector::softmax::rmsnorm(&mut rm, &src, &w, 1e-5);
+    acpu::vector::softmax::normalize(&mut rm, &src, &w, 1e-5);
     row(
-        "rmsnorm",
+        "normalize",
         ns(|| {
-            acpu::vector::softmax::rmsnorm(&mut rm, &src, &w, 1e-5);
+            acpu::vector::softmax::normalize(&mut rm, &src, &w, 1e-5);
             std::hint::black_box(&rm);
         }),
         ns(|| unsafe {
@@ -704,8 +704,8 @@ fn main() {
         let mut bf16buf = vec![0u16; ne];
         let mut fout = vec![0f32; ne];
         let t = ns(|| {
-            acpu::cvt_f32_bf16(&mut bf16buf, &fsrc);
-            acpu::cvt_bf16_f32(&mut fout, &bf16buf);
+            acpu::cast_f32_bf16(&mut bf16buf, &fsrc);
+            acpu::cast_bf16_f32(&mut fout, &bf16buf);
             std::hint::black_box(&fout);
         });
         eprintln!(
@@ -718,8 +718,8 @@ fn main() {
         // i8 quant round-trip: f32→i8→f32
         let mut i8buf = vec![0i8; ne];
         let t = ns(|| {
-            acpu::cvt_f32_i8(&mut i8buf, &fsrc, 0.01);
-            acpu::cvt_i8_f32(&mut fout, &i8buf, 0.01, 0);
+            acpu::cast_f32_i8(&mut i8buf, &fsrc, 0.01);
+            acpu::cast_i8_f32(&mut fout, &i8buf, 0.01, 0);
             std::hint::black_box(&fout);
         });
         eprintln!(
@@ -757,45 +757,45 @@ fn main() {
     cvt_row(
         "f32→f16",
         ns(|| {
-            acpu::cvt_f32_f16(&mut f16b, &fd);
+            acpu::cast_f32_f16(&mut f16b, &fd);
             std::hint::black_box(&f16b);
         }),
     );
-    acpu::cvt_f32_f16(&mut f16b, &fd);
+    acpu::cast_f32_f16(&mut f16b, &fd);
     cvt_row(
         "f16→f32",
         ns(|| {
-            acpu::cvt_f16_f32(&mut fo, &f16b);
+            acpu::cast_f16_f32(&mut fo, &f16b);
             std::hint::black_box(&fo);
         }),
     );
     cvt_row(
         "f32→bf16",
         ns(|| {
-            acpu::cvt_f32_bf16(&mut bfb, &fd);
+            acpu::cast_f32_bf16(&mut bfb, &fd);
             std::hint::black_box(&bfb);
         }),
     );
-    acpu::cvt_f32_bf16(&mut bfb, &fd);
+    acpu::cast_f32_bf16(&mut bfb, &fd);
     cvt_row(
         "bf16→f32",
         ns(|| {
-            acpu::cvt_bf16_f32(&mut fo, &bfb);
+            acpu::cast_bf16_f32(&mut fo, &bfb);
             std::hint::black_box(&fo);
         }),
     );
     cvt_row(
         "f32→i8",
         ns(|| {
-            acpu::cvt_f32_i8(&mut i8b, &fd, 0.1);
+            acpu::cast_f32_i8(&mut i8b, &fd, 0.1);
             std::hint::black_box(&i8b);
         }),
     );
-    acpu::cvt_f32_i8(&mut i8b, &fd, 0.1);
+    acpu::cast_f32_i8(&mut i8b, &fd, 0.1);
     cvt_row(
         "i8→f32",
         ns(|| {
-            acpu::cvt_i8_f32(&mut fo, &i8b, 0.1, 0);
+            acpu::cast_i8_f32(&mut fo, &i8b, 0.1, 0);
             std::hint::black_box(&fo);
         }),
     );
@@ -885,12 +885,12 @@ fn main() {
         } else {
             20
         };
-        acpu::sgemm(&a, &bm, &mut c_buf, sz, sz, sz);
+        acpu::matmul_f32(&a, &bm, &mut c_buf, sz, sz, sz);
         let mut t = vec![0u64; it];
         for i in 0..it {
             c_buf.fill(0.0);
             let s = Instant::now();
-            acpu::sgemm(&a, &bm, &mut c_buf, sz, sz, sz);
+            acpu::matmul_f32(&a, &bm, &mut c_buf, sz, sz, sz);
             t[i] = s.elapsed().as_nanos() as u64;
         }
         let an = med(&mut t);
@@ -914,7 +914,7 @@ fn main() {
         let ta = [1f32; 256];
         let tb = [1f32; 256];
         let mut tc = [0f32; 256];
-        acpu::sgemm(&ta, &tb, &mut tc, 16, 16, 16);
+        acpu::matmul_f32(&ta, &tb, &mut tc, 16, 16, 16);
     }
     unsafe {
         #[repr(align(128))]
@@ -1005,7 +1005,7 @@ fn main() {
     // ── PMU COUNTERS (optional, requires root) ───────────────────────────
 
     eprintln!("\n  PMU COUNTERS (IPC + cache behavior)");
-    match acpu::PulseCtx::new(&[
+    match acpu::Counters::new(&[
         acpu::pulse::Counter::Cycles,
         acpu::pulse::Counter::Instructions,
         acpu::pulse::Counter::L1dMisses,
@@ -1045,7 +1045,7 @@ fn main() {
                         let a = vec![1.0f32; sz * sz];
                         let b = vec![1.0f32; sz * sz];
                         let mut c = vec![0f32; sz * sz];
-                        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+                        acpu::matmul_f32(&a, &b, &mut c, sz, sz, sz);
                         std::hint::black_box(&c);
                     }),
                 ),

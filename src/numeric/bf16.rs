@@ -24,7 +24,7 @@ pub fn f32_to_bf16(v: f32) -> u16 {
 ///
 /// Since bf16->f32 is just a shift, the NEON path uses bit-shift instructions
 /// to process 4 elements at a time via `ushll`.
-pub fn cvt_bf16_f32(dst: &mut [f32], src: &[u16]) {
+pub fn cast_bf16_f32(dst: &mut [f32], src: &[u16]) {
     let n = dst.len().min(src.len());
 
     #[cfg(target_arch = "aarch64")]
@@ -86,7 +86,7 @@ pub fn cvt_bf16_f32(dst: &mut [f32], src: &[u16]) {
 /// On aarch64 with BF16 extension, this uses `bfcvtn`/`bfcvtn2` to narrow
 /// 8 f32 values into 8 bf16 packed in a NEON register. When the BF16
 /// instruction is not available, falls back to the scalar RNE path.
-pub fn cvt_f32_bf16(dst: &mut [u16], src: &[f32]) {
+pub fn cast_f32_bf16(dst: &mut [u16], src: &[f32]) {
     let n = dst.len().min(src.len());
 
     // Note: `bfcvtn` requires FEAT_BF16 (Apple M1+, Cortex-A510+).
@@ -188,8 +188,8 @@ mod tests {
         let src: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.5).collect();
         let mut bf = vec![0u16; 64];
         let mut dst = vec![0.0f32; 64];
-        cvt_f32_bf16(&mut bf, &src);
-        cvt_bf16_f32(&mut dst, &bf);
+        cast_f32_bf16(&mut bf, &src);
+        cast_bf16_f32(&mut dst, &bf);
         for i in 0..64 {
             assert!(
                 (dst[i] - src[i]).abs() < 0.5,

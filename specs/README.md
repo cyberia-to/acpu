@@ -24,8 +24,8 @@ six groups. each maps to a compute unit or system resource in silicon.
 | concept | what it is |
 |---------|-----------|
 | chip | identified Apple Silicon die — M1, M1 Pro, M2, M3, M4, etc. |
-| caps | runtime capability flags — what extensions this chip has |
-| ctx | AMX context — set/clr bracket, owns matrix register file |
+| features | runtime capability flags — what extensions this chip has |
+| matrix | AMX context — set/clr bracket, owns matrix register file |
 | xrow, yrow, zrow | typed AMX register handles (8 × 512-bit each bank) |
 | kernel | a compute operation dispatched to the best available unit |
 | lane | NEON vector register (128-bit, v0–v31) |
@@ -50,7 +50,7 @@ all detection is zero-cost after first call (cached in static).
 | M4 | Dorada/Brava | 4 | + AMX extrh/extrv, vecfp/vecint |
 | M4 Pro/Max | Dorada/Brava | 4 | same as M4 |
 
-## caps
+## features
 
 | field | type | semantics |
 |-------|------|-----------|
@@ -71,8 +71,8 @@ all detection is zero-cost after first call (cached in static).
 
 | method | signature | semantics |
 |--------|-----------|-----------|
-| detect | `() -> &'static Caps` | detect once, return cached reference |
-| chip | `() -> Chip` | shortcut for detect().chip |
+| scan | `() -> &'static Features` | detect once, return cached reference |
+| chip | `() -> Chip` | shortcut for scan().chip |
 | has | `(Feature) -> bool` | query single feature flag |
 
 ### system mapping
@@ -100,7 +100,7 @@ inline assembly.
 
 | method | signature | semantics |
 |--------|-----------|-----------|
-| new | `() -> AmxCtx` | AMX_SET — enable coprocessor, zero registers |
+| new | `() -> Matrix` | AMX_SET — enable coprocessor, zero registers |
 | drop | automatic | AMX_CLR — disable coprocessor |
 
 AMX_SET/AMX_CLR are bracketing instructions. all AMX operations
@@ -257,8 +257,8 @@ actual compute in 16-bit.
 
 | function | signature | semantics |
 |----------|-----------|-----------|
-| cvt_f16_f32 | `(&mut [f32], &[u16])` | bulk fp16→fp32, 32/iter (4× unrolled) |
-| cvt_f32_f16 | `(&mut [u16], &[f32])` | bulk fp32→fp16, 32/iter (4× unrolled) |
+| cast_f16_f32 | `(&mut [f32], &[u16])` | bulk fp16→fp32, 32/iter (4× unrolled) |
+| cast_f32_f16 | `(&mut [u16], &[f32])` | bulk fp32→fp16, 32/iter (4× unrolled) |
 | fp16_to_f32 | `(u16) -> f32` | scalar, single NEON fcvt |
 | f32_to_fp16 | `(f32) -> u16` | scalar, single NEON fcvt |
 
@@ -277,8 +277,8 @@ less precision. preferred for training.
 
 | function | signature | semantics |
 |----------|-----------|-----------|
-| cvt_f32_bf16 | `(&mut [u16], &[f32])` | bulk fp32→bf16 via bfcvt |
-| cvt_bf16_f32 | `(&mut [f32], &[u16])` | bulk bf16→fp32 (shift left 16) |
+| cast_f32_bf16 | `(&mut [u16], &[f32])` | bulk fp32→bf16 via bfcvt |
+| cast_bf16_f32 | `(&mut [f32], &[u16])` | bulk bf16→fp32 (shift left 16) |
 
 ## dotprod (FEAT_DotProd) — M1+
 
@@ -373,13 +373,13 @@ used between pack-thread and compute-thread in parallel GEMM.
 
 | function | instruction | semantics |
 |----------|-----------|-----------|
-| dmb_ish | DMB ISH | data memory barrier, inner shareable |
-| dsb_ish | DSB ISH | data sync barrier, inner shareable |
+| barrier | DMB ISH | data memory barrier, inner shareable |
+| fence | DSB ISH | data sync barrier, inner shareable |
 | isb | ISB | instruction sync barrier |
-| wfe | WFE | wait for event (low-power spin) |
-| sev | SEV | signal event (wake spinning core) |
+| wait | WFE | wait for event (low-power spin) |
+| wake | SEV | signal event (wake spinning core) |
 
-wfe/sev pair: spin-waiting threads use WFE to sleep until
+wait/wake pair: spin-waiting threads use WFE to sleep until
 producer calls SEV. saves power and thermal headroom during
 parallel GEMM synchronization.
 
@@ -443,7 +443,7 @@ AppleNeuralEngine.framework).
 
 | method | signature | semantics |
 |--------|-----------|-----------|
-| new | `(counters: &[Counter]) -> Result<PulseCtx>` | configure PMU via kpc_set_config |
+| new | `(counters: &[Counter]) -> Result<Counters>` | configure PMU via kpc_set_config |
 | start | `(&mut self)` | kpc_set_counting + kpc_set_thread_counting |
 | read | `(&self) -> Snapshot` | kpc_get_thread_counters64 |
 | stop | `(&mut self)` | disable counting |
@@ -461,7 +461,7 @@ AppleNeuralEngine.framework).
 ### usage pattern
 
 ```rust
-let mut pulse = PulseCtx::new(&[Counter::Cycles, Counter::L1dMisses])?;
+let mut pulse = Counters::new(&[Counter::Cycles, Counter::L1dMisses])?;
 pulse.start();
 let a = pulse.read();
 // ... compute ...
@@ -488,16 +488,16 @@ dispatch is resolved at first call and cached.
 
 | function | signature | semantics |
 |----------|-----------|-----------|
-| sgemm | `(a, b, c, m, n, k)` | C[m×n] += A[m×k] × B[k×n], fp32 |
-| hgemm | `(a, b, c, m, n, k)` | C[m×n] += A[m×k] × B[k×n], fp16 in, fp32 accum |
-| bgemm | `(a, b, c, m, n, k)` | C[m×n] += A[m×k] × B[k×n], bf16 in, fp32 accum — M2+ |
-| qgemm | `(a, b, c, m, n, k, scale, zero)` | int8 quantized matmul → fp32 |
+| matmul_f32 | `(a, b, c, m, n, k)` | C[m×n] += A[m×k] × B[k×n], fp32 |
+| matmul_f16 | `(a, b, c, m, n, k)` | C[m×n] += A[m×k] × B[k×n], fp16 in, fp32 accum |
+| matmul_bf16 | `(a, b, c, m, n, k)` | C[m×n] += A[m×k] × B[k×n], bf16 in, fp32 accum — M2+ |
+| matmul_i8 | `(a, b, c, m, n, k, scale, zero)` | int8 quantized matmul → fp32 |
 
 dispatch:
-- sgemm: AMX fma32 → NEON fmla
-- hgemm: AMX fma16 → NEON FP16 fmla
-- bgemm: AMX fmabf16 → NEON bfmmla → NEON bfdot
-- qgemm: NEON I8MM smmla → NEON DotProd sdot → scalar
+- matmul_f32: AMX fma32 → NEON fmla
+- matmul_f16: AMX fma16 → NEON FP16 fmla
+- matmul_bf16: AMX fmabf16 → NEON bfmmla → NEON bfdot
+- matmul_i8: NEON I8MM smmla → NEON DotProd sdot → scalar
 
 ## math (elementwise, vectorized)
 
@@ -513,19 +513,19 @@ minimum, tail-masked.
 | gelu | `(&mut [f32])` | 0.5x(1+tanh(√(2/π)(x+0.044715x³))) |
 | silu | `(&mut [f32])` | x × sigmoid(x) |
 | softmax | `(&mut [f32])` | exp(x)/Σexp(x) |
-| rmsnorm | `(out, x, weight, eps)` | x × weight / √(mean(x²)+ε) |
-| rope | `(out, x, freqs, pos)` | rotary positional embedding |
+| normalize | `(out, x, weight, eps)` | x × weight / √(mean(x²)+ε) |
+| rotate | `(out, x, freqs, pos)` | rotary positional embedding |
 
 ## convert (bulk, vectorized)
 
 | function | signature | semantics |
 |----------|-----------|-----------|
-| cvt_f16_f32 | `(&mut [f32], &[u16])` | fp16 → fp32, NEON 32/iter |
-| cvt_f32_f16 | `(&mut [u16], &[f32])` | fp32 → fp16, NEON 32/iter |
-| cvt_bf16_f32 | `(&mut [f32], &[u16])` | bf16 → fp32, shift |
-| cvt_f32_bf16 | `(&mut [u16], &[f32])` | fp32 → bf16, NEON bfcvt |
-| cvt_f32_i8 | `(&mut [i8], &[f32], scale)` | quantize fp32 → int8 |
-| cvt_i8_f32 | `(&mut [f32], &[i8], scale, zero)` | dequantize int8 → fp32 |
+| cast_f16_f32 | `(&mut [f32], &[u16])` | fp16 → fp32, NEON 32/iter |
+| cast_f32_f16 | `(&mut [u16], &[f32])` | fp32 → fp16, NEON 32/iter |
+| cast_bf16_f32 | `(&mut [f32], &[u16])` | bf16 → fp32, shift |
+| cast_f32_bf16 | `(&mut [u16], &[f32])` | fp32 → bf16, NEON bfcvt |
+| cast_f32_i8 | `(&mut [i8], &[f32], scale)` | quantize fp32 → int8 |
+| cast_i8_f32 | `(&mut [f32], &[i8], scale, zero)` | dequantize int8 → fp32 |
 
 ## reduce
 
@@ -535,7 +535,7 @@ minimum, tail-masked.
 | max | `(&[f32]) -> f32` | NEON fmaxnmv |
 | min | `(&[f32]) -> f32` | NEON fminnmv |
 | dot | `(&[f32], &[f32]) -> f32` | NEON fmla + reduce |
-| norm_l2 | `(&[f32]) -> f32` | √Σx² |
+| length | `(&[f32]) -> f32` | √Σx² |
 
 ---
 
@@ -555,11 +555,11 @@ AffinityFailed(String)   QoS class change failed
 
 # execution model
 
-- AMX is per-thread. each thread needs its own AmxCtx
+- AMX is per-thread. each thread needs its own Matrix
 - AMX set/clr are cheap (~1 cycle). open a context per GEMM call, not per thread lifetime
 - NEON registers are callee-saved (v8–v15). inline asm must respect this
 - all kernels are synchronous. no async dispatch model (this is CPU, not GPU)
-- parallel GEMM: partition M dimension across threads, each thread gets own AmxCtx
+- parallel GEMM: partition M dimension across threads, each thread gets own Matrix
 - sync between threads: WFE/SEV + LSE atomics (no mutexes in hot path)
 - memory: all buffers are caller-owned slices. acpu allocates nothing on heap
 - all public functions are `#[inline]` or dispatch through cached function pointers
@@ -581,18 +581,18 @@ acpu crate
 
 ```
 src/
-  lib.rs              pub API re-exports, RamxError
-  probe.rs            Chip, Caps, Feature, detect()
+  lib.rs              pub API re-exports, CpuError
+  probe.rs            Chip, Features, Feature, scan()
   matrix/
-    mod.rs            AmxCtx lifecycle (set/clr)
+    mod.rs            Matrix lifecycle (set/clr)
     ops.rs            load/store, fma32/fma16/fmabf16/mac16
     regs.rs           XRow, YRow, ZRow typed wrappers
     asm.rs            raw .word encoding macros
   vector/
     mod.rs            NEON kernel dispatch
     math.rs           exp, log, tanh, sigmoid, gelu, silu
-    reduce.rs         sum, max, min, dot, norm_l2
-    softmax.rs        softmax, rmsnorm
+    reduce.rs         sum, max, min, dot, length
+    softmax.rs        softmax, normalize
     rope.rs           rotary positional embedding
   numeric/
     fp16.rs           FP16 arithmetic + bulk convert
@@ -600,14 +600,14 @@ src/
     quant.rs          DotProd, I8MM, quantize/dequantize
     complex.rs        FCMA complex mul-acc
   sync/
-    mod.rs            barriers, wfe/sev
+    mod.rs            barriers, wait/wake
     affinity.rs       pin_p_core, pin_e_core
     prefetch.rs       PRFM wrappers
   pulse/
-    mod.rs            PulseCtx, Counter, Snapshot
+    mod.rs            Counters, Counter, Snapshot
     ffi.rs            dlopen libkperf, kpc_* symbols
-  gemm.rs             sgemm, hgemm, bgemm, qgemm (auto-dispatch)
-  convert.rs          cvt_* bulk conversion (re-exports from numeric)
+  gemm.rs             matmul_f32, matmul_f16, matmul_bf16, matmul_i8 (auto-dispatch)
+  convert.rs          cast_* bulk conversion (re-exports from numeric)
   probe/
     main.rs           acpu_probe binary — exercise every organ
 ```

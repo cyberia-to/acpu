@@ -1,43 +1,51 @@
 // ---------------------------------------------------------------------------
-// Reduction operations -- NEON fast-path + scalar fallback
+// Reduction operations -- NEON 4-way unrolled + scalar fallback
 // ---------------------------------------------------------------------------
 
 #[cfg(target_arch = "aarch64")]
 use core::arch::aarch64::*;
 
-/// Sum of all elements.
+/// Sum of all elements. 4-accumulator ILP for NEON pipeline saturation.
 pub fn sum(x: &[f32]) -> f32 {
     let len = x.len();
     if len == 0 {
         return 0.0;
     }
-    let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
-        let mut acc = unsafe { vdupq_n_f32(0.0) };
+        let mut i = 0;
         unsafe {
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut a2 = vdupq_n_f32(0.0);
+            let mut a3 = vdupq_n_f32(0.0);
+            let p = x.as_ptr();
+            while i + 16 <= len {
+                a0 = vaddq_f32(a0, vld1q_f32(p.add(i)));
+                a1 = vaddq_f32(a1, vld1q_f32(p.add(i + 4)));
+                a2 = vaddq_f32(a2, vld1q_f32(p.add(i + 8)));
+                a3 = vaddq_f32(a3, vld1q_f32(p.add(i + 12)));
+                i += 16;
+            }
+            // Fold 4 accumulators → 1
+            a0 = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
             while i + 4 <= len {
-                let v = vld1q_f32(x.as_ptr().add(i));
-                acc = vaddq_f32(acc, v);
+                a0 = vaddq_f32(a0, vld1q_f32(p.add(i)));
                 i += 4;
             }
+            let mut s = vaddvq_f32(a0);
+            while i < len {
+                s += *p.add(i);
+                i += 1;
+            }
+            s
         }
-        let mut s = unsafe { vaddvq_f32(acc) };
-        while i < len {
-            s += x[i];
-            i += 1;
-        }
-        s
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let mut s = 0.0f32;
-        for &v in x {
-            s += v;
-        }
-        s
+        x.iter().sum()
     }
 }
 
@@ -47,35 +55,43 @@ pub fn max(x: &[f32]) -> f32 {
     if len == 0 {
         return f32::NEG_INFINITY;
     }
-    let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
-        let mut acc = unsafe { vdupq_n_f32(f32::NEG_INFINITY) };
+        let mut i = 0;
         unsafe {
+            let mut a0 = vdupq_n_f32(f32::NEG_INFINITY);
+            let mut a1 = a0;
+            let mut a2 = a0;
+            let mut a3 = a0;
+            let p = x.as_ptr();
+            while i + 16 <= len {
+                a0 = vmaxnmq_f32(a0, vld1q_f32(p.add(i)));
+                a1 = vmaxnmq_f32(a1, vld1q_f32(p.add(i + 4)));
+                a2 = vmaxnmq_f32(a2, vld1q_f32(p.add(i + 8)));
+                a3 = vmaxnmq_f32(a3, vld1q_f32(p.add(i + 12)));
+                i += 16;
+            }
+            a0 = vmaxnmq_f32(vmaxnmq_f32(a0, a1), vmaxnmq_f32(a2, a3));
             while i + 4 <= len {
-                let v = vld1q_f32(x.as_ptr().add(i));
-                acc = vmaxnmq_f32(acc, v);
+                a0 = vmaxnmq_f32(a0, vld1q_f32(p.add(i)));
                 i += 4;
             }
+            let mut m = vmaxnmvq_f32(a0);
+            while i < len {
+                let v = *p.add(i);
+                if v > m {
+                    m = v;
+                }
+                i += 1;
+            }
+            m
         }
-        let mut m = unsafe { vmaxnmvq_f32(acc) };
-        while i < len {
-            m = if x[i] > m { x[i] } else { m };
-            i += 1;
-        }
-        m
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let mut m = f32::NEG_INFINITY;
-        for &v in x {
-            if v > m {
-                m = v;
-            }
-        }
-        m
+        x.iter().copied().fold(f32::NEG_INFINITY, f32::max)
     }
 }
 
@@ -85,35 +101,43 @@ pub fn min(x: &[f32]) -> f32 {
     if len == 0 {
         return f32::INFINITY;
     }
-    let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
-        let mut acc = unsafe { vdupq_n_f32(f32::INFINITY) };
+        let mut i = 0;
         unsafe {
+            let mut a0 = vdupq_n_f32(f32::INFINITY);
+            let mut a1 = a0;
+            let mut a2 = a0;
+            let mut a3 = a0;
+            let p = x.as_ptr();
+            while i + 16 <= len {
+                a0 = vminnmq_f32(a0, vld1q_f32(p.add(i)));
+                a1 = vminnmq_f32(a1, vld1q_f32(p.add(i + 4)));
+                a2 = vminnmq_f32(a2, vld1q_f32(p.add(i + 8)));
+                a3 = vminnmq_f32(a3, vld1q_f32(p.add(i + 12)));
+                i += 16;
+            }
+            a0 = vminnmq_f32(vminnmq_f32(a0, a1), vminnmq_f32(a2, a3));
             while i + 4 <= len {
-                let v = vld1q_f32(x.as_ptr().add(i));
-                acc = vminnmq_f32(acc, v);
+                a0 = vminnmq_f32(a0, vld1q_f32(p.add(i)));
                 i += 4;
             }
+            let mut m = vminnmvq_f32(a0);
+            while i < len {
+                let v = *p.add(i);
+                if v < m {
+                    m = v;
+                }
+                i += 1;
+            }
+            m
         }
-        let mut m = unsafe { vminnmvq_f32(acc) };
-        while i < len {
-            m = if x[i] < m { x[i] } else { m };
-            i += 1;
-        }
-        m
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let mut m = f32::INFINITY;
-        for &v in x {
-            if v < m {
-                m = v;
-            }
-        }
-        m
+        x.iter().copied().fold(f32::INFINITY, f32::min)
     }
 }
 
@@ -124,70 +148,90 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     if len == 0 {
         return 0.0;
     }
-    let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
-        let mut acc = unsafe { vdupq_n_f32(0.0) };
+        let mut i = 0;
         unsafe {
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut a2 = vdupq_n_f32(0.0);
+            let mut a3 = vdupq_n_f32(0.0);
+            let pa = a.as_ptr();
+            let pb = b.as_ptr();
+            while i + 16 <= len {
+                a0 = vfmaq_f32(a0, vld1q_f32(pa.add(i)), vld1q_f32(pb.add(i)));
+                a1 = vfmaq_f32(a1, vld1q_f32(pa.add(i + 4)), vld1q_f32(pb.add(i + 4)));
+                a2 = vfmaq_f32(a2, vld1q_f32(pa.add(i + 8)), vld1q_f32(pb.add(i + 8)));
+                a3 = vfmaq_f32(a3, vld1q_f32(pa.add(i + 12)), vld1q_f32(pb.add(i + 12)));
+                i += 16;
+            }
+            a0 = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
             while i + 4 <= len {
-                let va = vld1q_f32(a.as_ptr().add(i));
-                let vb = vld1q_f32(b.as_ptr().add(i));
-                acc = vfmaq_f32(acc, va, vb);
+                a0 = vfmaq_f32(a0, vld1q_f32(pa.add(i)), vld1q_f32(pb.add(i)));
                 i += 4;
             }
+            let mut s = vaddvq_f32(a0);
+            while i < len {
+                s += *pa.add(i) * *pb.add(i);
+                i += 1;
+            }
+            s
         }
-        let mut s = unsafe { vaddvq_f32(acc) };
-        while i < len {
-            s += a[i] * b[i];
-            i += 1;
-        }
-        s
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let mut s = 0.0f32;
-        for j in 0..len {
-            s += a[j] * b[j];
-        }
-        s
+        a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
     }
 }
 
 /// L2 norm: sqrt(sum(x_i^2)).
-pub fn norm_l2(x: &[f32]) -> f32 {
+pub fn length(x: &[f32]) -> f32 {
     let len = x.len();
     if len == 0 {
         return 0.0;
     }
-    let mut i = 0;
 
     #[cfg(target_arch = "aarch64")]
     {
-        let mut acc = unsafe { vdupq_n_f32(0.0) };
+        let mut i = 0;
         unsafe {
+            let mut a0 = vdupq_n_f32(0.0);
+            let mut a1 = vdupq_n_f32(0.0);
+            let mut a2 = vdupq_n_f32(0.0);
+            let mut a3 = vdupq_n_f32(0.0);
+            let p = x.as_ptr();
+            while i + 16 <= len {
+                let v0 = vld1q_f32(p.add(i));
+                let v1 = vld1q_f32(p.add(i + 4));
+                let v2 = vld1q_f32(p.add(i + 8));
+                let v3 = vld1q_f32(p.add(i + 12));
+                a0 = vfmaq_f32(a0, v0, v0);
+                a1 = vfmaq_f32(a1, v1, v1);
+                a2 = vfmaq_f32(a2, v2, v2);
+                a3 = vfmaq_f32(a3, v3, v3);
+                i += 16;
+            }
+            a0 = vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3));
             while i + 4 <= len {
-                let v = vld1q_f32(x.as_ptr().add(i));
-                acc = vfmaq_f32(acc, v, v);
+                let v = vld1q_f32(p.add(i));
+                a0 = vfmaq_f32(a0, v, v);
                 i += 4;
             }
+            let mut s = vaddvq_f32(a0);
+            while i < len {
+                let v = *p.add(i);
+                s += v * v;
+                i += 1;
+            }
+            s.sqrt()
         }
-        let mut s = unsafe { vaddvq_f32(acc) };
-        while i < len {
-            s += x[i] * x[i];
-            i += 1;
-        }
-        s.sqrt()
     }
 
     #[cfg(not(target_arch = "aarch64"))]
     {
-        let mut s = 0.0f32;
-        for &v in x {
-            s += v * v;
-        }
-        s.sqrt()
+        x.iter().map(|v| v * v).sum::<f32>().sqrt()
     }
 }
 
@@ -199,6 +243,13 @@ mod tests {
     fn test_sum() {
         let v = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         assert!((sum(&v) - 15.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_sum_large() {
+        let v: Vec<f32> = (0..4096).map(|i| (i % 10) as f32).collect();
+        let expected: f32 = v.iter().sum();
+        assert!((sum(&v) - expected).abs() < 1.0);
     }
 
     #[test]
@@ -216,9 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn test_norm_l2() {
+    fn test_length() {
         let v = vec![3.0, 4.0];
-        assert!((norm_l2(&v) - 5.0).abs() < 1e-5);
+        assert!((length(&v) - 5.0).abs() < 1e-5);
     }
 
     #[test]
@@ -226,6 +277,6 @@ mod tests {
         assert_eq!(sum(&[]), 0.0);
         assert_eq!(max(&[]), f32::NEG_INFINITY);
         assert_eq!(min(&[]), f32::INFINITY);
-        assert_eq!(norm_l2(&[]), 0.0);
+        assert_eq!(length(&[]), 0.0);
     }
 }
