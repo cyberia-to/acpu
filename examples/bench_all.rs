@@ -1,5 +1,5 @@
-//! acpu full driver audit vs Apple frameworks.
-//! Every row: operation | acpu | apple/ref | ratio
+//! acpu vs Apple Accelerate — comprehensive benchmark.
+//! every row: operation | acpu | accelerate | speedup (>1× = acpu wins)
 use std::time::Instant;
 
 fn med(t: &mut [u64]) -> u64 {
@@ -8,10 +8,10 @@ fn med(t: &mut [u64]) -> u64 {
 }
 
 fn ns<F: FnMut()>(mut f: F) -> u64 {
-    let dl = Instant::now() + std::time::Duration::from_secs(2);
     f();
-    let mut t = Vec::with_capacity(100);
-    for _ in 0..100 {
+    let dl = Instant::now() + std::time::Duration::from_secs(2);
+    let mut t = Vec::with_capacity(200);
+    for _ in 0..200 {
         if Instant::now() > dl {
             break;
         }
@@ -25,38 +25,66 @@ fn ns<F: FnMut()>(mut f: F) -> u64 {
     med(&mut t)
 }
 
-fn hdr() {
+// ── output formatting ────────────────────────────────────────────────────
+
+static mut WINS: u32 = 0;
+static mut TIES: u32 = 0;
+static mut TOTAL: u32 = 0;
+
+fn hdr(section: &str) {
+    eprintln!("\n  {section}");
     eprintln!(
-        "  {:<16} {:>8} {:>8}  {:>8} {:>8}  {:>5}",
-        "operation", "acpu", "Ge/s", "apple", "Ge/s", "ratio"
+        "  {:<18} {:>9} {:>9} {:>8}",
+        "operation", "acpu", "apple", "speedup"
     );
-    eprintln!("  {}", "─".repeat(58));
+    eprintln!("  {}", "─".repeat(48));
 }
 
-fn row(op: &str, n: usize, acpu: u64, apple: u64) {
-    let ag = n as f64 / acpu.max(1) as f64;
-    if apple == 0 || apple == u64::MAX {
-        eprintln!(
-            "  {:<16} {:>7}ns {:>7.1}  {:>8} {:>8}  {:>5}",
-            op, acpu, ag, "—", "—", "—"
-        );
+fn row(op: &str, acpu_ns: u64, apple_ns: u64) {
+    unsafe {
+        TOTAL += 1;
+    }
+    if apple_ns == 0 || apple_ns == u64::MAX {
+        eprintln!("  {:<18} {:>8}ns {:>9} {:>8}", op, acpu_ns, "—", "—");
     } else {
-        let apg = n as f64 / apple.max(1) as f64;
-        let r = acpu as f64 / apple as f64;
+        let speedup = apple_ns as f64 / acpu_ns as f64;
+        let marker = if speedup >= 1.05 {
+            unsafe { WINS += 1 };
+            " ←"
+        } else if speedup <= 0.95 {
+            ""
+        } else {
+            unsafe { TIES += 1 };
+            "  ≈"
+        };
         eprintln!(
-            "  {:<16} {:>7}ns {:>7.1}  {:>7}ns {:>7.1}  {:>4.1}x",
-            op, acpu, ag, apple, apg, r
+            "  {:<18} {:>8}ns {:>8}ns {:>6.2}×{}",
+            op, acpu_ns, apple_ns, speedup, marker
         );
     }
 }
 
 fn row_gf(op: &str, acpu_gf: f64, apple_gf: f64) {
-    let r = apple_gf / acpu_gf;
+    unsafe {
+        TOTAL += 1;
+    }
+    let ratio = acpu_gf / apple_gf;
+    let marker = if ratio >= 1.05 {
+        unsafe { WINS += 1 };
+        " ←"
+    } else if ratio <= 0.95 {
+        ""
+    } else {
+        unsafe { TIES += 1 };
+        "  ≈"
+    };
     eprintln!(
-        "  {:<16} {:>16.0}GF {:>16.0}GF  {:>4.1}x",
-        op, acpu_gf, apple_gf, r
+        "  {:<18} {:>7.0}GF {:>7.0}GF {:>6.2}×{}",
+        op, acpu_gf, apple_gf, ratio, marker
     );
 }
+
+// ── Apple Accelerate FFI ─────────────────────────────────────────────────
 
 #[link(name = "Accelerate", kind = "framework")]
 extern "C" {
@@ -81,16 +109,24 @@ extern "C" {
     fn vvexpf(y: *mut f32, x: *const f32, n: *const i32);
     fn vvlogf(y: *mut f32, x: *const f32, n: *const i32);
     fn vvtanhf(y: *mut f32, x: *const f32, n: *const i32);
+
     fn vDSP_sve(a: *const f32, ia: i64, c: *mut f32, n: u64);
+    fn vDSP_svesq(a: *const f32, ia: i64, c: *mut f32, n: u64);
     fn vDSP_maxv(a: *const f32, ia: i64, c: *mut f32, n: u64);
+    fn vDSP_minv(a: *const f32, ia: i64, c: *mut f32, n: u64);
+    fn vDSP_vneg(a: *const f32, ia: i64, c: *mut f32, ic: i64, n: u64);
+    fn vDSP_vadd(a: *const f32, ia: i64, b: *const f32, ib: i64, c: *mut f32, ic: i64, n: u64);
+    fn vDSP_vmul(a: *const f32, ia: i64, b: *const f32, ib: i64, c: *mut f32, ic: i64, n: u64);
     fn vDSP_vsadd(a: *const f32, ia: i64, b: *const f32, c: *mut f32, ic: i64, n: u64);
+    fn vDSP_vsmul(a: *const f32, ia: i64, b: *const f32, c: *mut f32, ic: i64, n: u64);
     fn vDSP_vsdiv(a: *const f32, ia: i64, b: *const f32, c: *mut f32, ic: i64, n: u64);
+    fn vDSP_svdiv(a: *const f32, b: *const f32, ib: i64, c: *mut f32, ic: i64, n: u64);
 }
 
 fn main() {
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(30));
-        eprintln!("\n!!! 30s TIMEOUT !!!");
+        std::thread::sleep(std::time::Duration::from_secs(120));
+        eprintln!("\n!!! 120s TIMEOUT !!!");
         std::process::exit(0);
     });
 
@@ -99,86 +135,117 @@ fn main() {
     let nu = n as u64;
     let src: Vec<f32> = (0..n).map(|i| (i % 100) as f32 * 0.01 - 0.5).collect();
     let pos: Vec<f32> = src.iter().map(|x| x.abs() + 0.01).collect();
+    let mut b = src.clone();
+    let mut d = vec![0f32; n];
+    let mut d2 = vec![0f32; n];
 
     let c = acpu::probe::detect();
     eprintln!(
-        "=== acpu driver audit — {:?} ({}P+{}E) — {} f32 ===\n",
+        "=== acpu vs Apple Accelerate — {:?} ({}P+{}E) — {} f32 ===",
         c.chip, c.p_cores, c.e_cores, n
     );
 
-    // ---- VECTOR MATH ----
-    eprintln!("  VECTOR MATH");
-    hdr();
-    let mut b = src.clone();
-    let mut d = vec![0f32; n];
+    // ── ELEMENTWISE ──────────────────────────────────────────────────────
+
+    hdr("ELEMENTWISE (in-place, 4096 f32)");
+
     row(
         "exp",
-        n,
         ns(|| {
             b.copy_from_slice(&src);
             acpu::vector::math::exp(&mut b);
         }),
-        ns(|| unsafe {
-            vvexpf(d.as_mut_ptr(), src.as_ptr(), &nn);
-        }),
+        ns(|| unsafe { vvexpf(d.as_mut_ptr(), src.as_ptr(), &nn) }),
     );
     row(
         "log",
-        n,
         ns(|| {
             b.copy_from_slice(&pos);
             acpu::vector::math::log(&mut b);
         }),
-        ns(|| unsafe {
-            vvlogf(d.as_mut_ptr(), pos.as_ptr(), &nn);
-        }),
+        ns(|| unsafe { vvlogf(d.as_mut_ptr(), pos.as_ptr(), &nn) }),
     );
     row(
         "tanh",
-        n,
         ns(|| {
             b.copy_from_slice(&src);
             acpu::vector::math::tanh(&mut b);
         }),
-        ns(|| unsafe {
-            vvtanhf(d.as_mut_ptr(), src.as_ptr(), &nn);
-        }),
+        ns(|| unsafe { vvtanhf(d.as_mut_ptr(), src.as_ptr(), &nn) }),
     );
+    // Apple sigmoid: 1/(1+exp(-x))  built from vDSP_vneg + vvexpf + vDSP_vsadd + vDSP_svdiv
     row(
         "sigmoid",
-        n,
         ns(|| {
             b.copy_from_slice(&src);
             acpu::vector::math::sigmoid(&mut b);
         }),
-        0,
+        ns(|| unsafe {
+            vDSP_vneg(src.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            vvexpf(d.as_mut_ptr(), d.as_ptr(), &nn);
+            let one: f32 = 1.0;
+            vDSP_vsadd(d.as_ptr(), 1, &one, d.as_mut_ptr(), 1, nu);
+            let one_r: f32 = 1.0;
+            vDSP_svdiv(&one_r, d.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+        }),
     );
+    // Apple gelu: 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x³)))
     row(
         "gelu",
-        n,
         ns(|| {
             b.copy_from_slice(&src);
             acpu::vector::math::gelu(&mut b);
         }),
-        0,
+        ns(|| unsafe {
+            // d = x²
+            vDSP_vmul(src.as_ptr(), 1, src.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            // d = x³
+            vDSP_vmul(d.as_ptr(), 1, src.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            // d = 0.044715 * x³
+            let c1: f32 = 0.044715;
+            vDSP_vsmul(d.as_ptr(), 1, &c1, d.as_mut_ptr(), 1, nu);
+            // d = x + 0.044715*x³
+            vDSP_vadd(src.as_ptr(), 1, d.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            // d = sqrt(2/pi) * (...)
+            let c2: f32 = 0.7978845608;
+            vDSP_vsmul(d.as_ptr(), 1, &c2, d.as_mut_ptr(), 1, nu);
+            // d = tanh(...)
+            vvtanhf(d.as_mut_ptr(), d.as_ptr(), &nn);
+            // d = 1 + tanh(...)
+            let one: f32 = 1.0;
+            vDSP_vsadd(d.as_ptr(), 1, &one, d.as_mut_ptr(), 1, nu);
+            // d2 = 0.5 * x
+            let half: f32 = 0.5;
+            vDSP_vsmul(src.as_ptr(), 1, &half, d2.as_mut_ptr(), 1, nu);
+            // d = 0.5*x * (1+tanh(...))
+            vDSP_vmul(d2.as_ptr(), 1, d.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+        }),
     );
+    // Apple silu: x * sigmoid(x)
     row(
         "silu",
-        n,
         ns(|| {
             b.copy_from_slice(&src);
             acpu::vector::math::silu(&mut b);
         }),
-        0,
+        ns(|| unsafe {
+            vDSP_vneg(src.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            vvexpf(d.as_mut_ptr(), d.as_ptr(), &nn);
+            let one: f32 = 1.0;
+            vDSP_vsadd(d.as_ptr(), 1, &one, d.as_mut_ptr(), 1, nu);
+            let one_r: f32 = 1.0;
+            vDSP_svdiv(&one_r, d.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            vDSP_vmul(src.as_ptr(), 1, d.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+        }),
     );
 
-    // ---- REDUCTIONS ----
-    eprintln!("\n  REDUCTIONS");
-    hdr();
+    // ── REDUCTIONS ───────────────────────────────────────────────────────
+
+    hdr("REDUCTIONS (4096 f32 → scalar)");
     let mut r = 0f32;
+
     row(
         "sum",
-        n,
         ns(|| {
             std::hint::black_box(acpu::vector::reduce::sum(&src));
         }),
@@ -189,7 +256,6 @@ fn main() {
     );
     row(
         "dot",
-        n,
         ns(|| {
             std::hint::black_box(acpu::vector::reduce::dot(&src, &src));
         }),
@@ -199,7 +265,6 @@ fn main() {
     );
     row(
         "norm_l2",
-        n,
         ns(|| {
             std::hint::black_box(acpu::vector::reduce::norm_l2(&src));
         }),
@@ -209,7 +274,6 @@ fn main() {
     );
     row(
         "max",
-        n,
         ns(|| {
             std::hint::black_box(acpu::vector::reduce::max(&src));
         }),
@@ -218,13 +282,24 @@ fn main() {
             std::hint::black_box(r);
         }),
     );
+    row(
+        "min",
+        ns(|| {
+            std::hint::black_box(acpu::vector::reduce::min(&src));
+        }),
+        ns(|| unsafe {
+            vDSP_minv(src.as_ptr(), 1, &mut r, nu);
+            std::hint::black_box(r);
+        }),
+    );
 
-    // ---- COMPOUND ----
-    eprintln!("\n  COMPOUND OPS");
-    hdr();
+    // ── COMPOUND OPS ─────────────────────────────────────────────────────
+
+    hdr("COMPOUND (4096 f32)");
+
+    // Apple softmax: max → subtract → exp → sum → divide
     row(
         "softmax",
-        n,
         ns(|| {
             b.copy_from_slice(&src);
             acpu::vector::softmax::softmax(&mut b);
@@ -240,21 +315,35 @@ fn main() {
             vDSP_vsdiv(d.as_ptr(), 1, &s, d.as_mut_ptr(), 1, nu);
         }),
     );
+    // Apple rmsnorm: svesq → mean → rsqrt → scale → multiply by weight
     let w: Vec<f32> = (0..n).map(|i| (i % 13) as f32 * 0.1).collect();
     let mut rm = vec![0f32; n];
     acpu::vector::softmax::rmsnorm(&mut rm, &src, &w, 1e-5);
     row(
         "rmsnorm",
-        n,
         ns(|| {
             acpu::vector::softmax::rmsnorm(&mut rm, &src, &w, 1e-5);
+            std::hint::black_box(&rm);
         }),
-        0,
+        ns(|| unsafe {
+            let mut sumsq: f32 = 0.0;
+            vDSP_svesq(src.as_ptr(), 1, &mut sumsq, nu);
+            let rsqrt = 1.0 / (sumsq / n as f32 + 1e-5f32).sqrt();
+            vDSP_vsmul(src.as_ptr(), 1, &rsqrt, d.as_mut_ptr(), 1, nu);
+            vDSP_vmul(d.as_ptr(), 1, w.as_ptr(), 1, d.as_mut_ptr(), 1, nu);
+            std::hint::black_box(&d);
+        }),
     );
 
-    // ---- CONVERSIONS (compare to memcpy as baseline) ----
-    eprintln!("\n  CONVERSIONS (ref=memcpy)");
-    hdr();
+    // ── CONVERSIONS ──────────────────────────────────────────────────────
+
+    eprintln!("\n  CONVERSIONS (4096 elements, ref = memcpy)");
+    eprintln!(
+        "  {:<18} {:>9} {:>9} {:>8}",
+        "operation", "acpu", "memcpy", "overhead"
+    );
+    eprintln!("  {}", "─".repeat(48));
+
     let fd: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
     let mut f16b = vec![0u16; n];
     let mut fo = vec![0f32; n];
@@ -264,73 +353,86 @@ fn main() {
         fo.copy_from_slice(&fd);
         std::hint::black_box(&fo);
     });
-    row(
+    let cvt_row = |op: &str, acpu_ns: u64| {
+        let overhead = acpu_ns as f64 / memcpy_ns.max(1) as f64;
+        eprintln!(
+            "  {:<18} {:>8}ns {:>8}ns {:>6.2}×",
+            op, acpu_ns, memcpy_ns, overhead
+        );
+    };
+    cvt_row(
         "f32→f16",
-        n,
         ns(|| {
             acpu::cvt_f32_f16(&mut f16b, &fd);
+            std::hint::black_box(&f16b);
         }),
-        memcpy_ns,
     );
     acpu::cvt_f32_f16(&mut f16b, &fd);
-    row(
+    cvt_row(
         "f16→f32",
-        n,
         ns(|| {
             acpu::cvt_f16_f32(&mut fo, &f16b);
+            std::hint::black_box(&fo);
         }),
-        memcpy_ns,
     );
-    row(
+    cvt_row(
         "f32→bf16",
-        n,
         ns(|| {
             acpu::cvt_f32_bf16(&mut bfb, &fd);
+            std::hint::black_box(&bfb);
         }),
-        memcpy_ns,
     );
     acpu::cvt_f32_bf16(&mut bfb, &fd);
-    row(
+    cvt_row(
         "bf16→f32",
-        n,
         ns(|| {
             acpu::cvt_bf16_f32(&mut fo, &bfb);
+            std::hint::black_box(&fo);
         }),
-        memcpy_ns,
     );
-    row(
+    cvt_row(
         "f32→i8",
-        n,
         ns(|| {
             acpu::cvt_f32_i8(&mut i8b, &fd, 0.1);
+            std::hint::black_box(&i8b);
         }),
-        memcpy_ns,
     );
     acpu::cvt_f32_i8(&mut i8b, &fd, 0.1);
-    row(
+    cvt_row(
         "i8→f32",
-        n,
         ns(|| {
             acpu::cvt_i8_f32(&mut fo, &i8b, 0.1, 0);
+            std::hint::black_box(&fo);
         }),
-        memcpy_ns,
     );
-    eprintln!("  (memcpy 4096 f32 = {} ns baseline)", memcpy_ns);
+    eprintln!("  (memcpy {} f32 = {}ns baseline)", n, memcpy_ns);
 
-    // ---- GEMM ----
-    eprintln!("\n  GEMM");
+    // ── GEMM — full spectrum 2×2 → 4096×4096 ──────────────────────────
+
+    let gemm_sizes: Vec<usize> = vec![2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+
+    eprintln!("\n  SGEMM — full spectrum (GFLOPS, higher = better)");
     eprintln!(
-        "  {:<16} {:>10} {:>10}  {:>5}",
-        "size", "acpu GF", "apple GF", "ratio"
+        "  {:<18} {:>9} {:>9} {:>8}",
+        "size", "acpu", "apple", "ratio"
     );
-    eprintln!("  {}", "─".repeat(44));
-    let ag = std::thread::spawn(|| {
-        let mut r = Vec::new();
-        for &sz in &[64, 256, 1024] {
+    eprintln!("  {}", "─".repeat(48));
+
+    // Apple GEMM in parallel thread
+    let gsz = gemm_sizes.clone();
+    let apple_gemm = std::thread::spawn(move || {
+        let mut results = Vec::new();
+        for &sz in &gsz {
             let a = vec![1f32; sz * sz];
             let b = vec![1f32; sz * sz];
-            let mut c = vec![0f32; sz * sz];
-            let it = if sz >= 1024 { 3 } else { 10 };
+            let mut c_buf = vec![0f32; sz * sz];
+            let it = if sz >= 2048 {
+                2
+            } else if sz >= 512 {
+                5
+            } else {
+                20
+            };
             unsafe {
                 cblas_sgemm(
                     101,
@@ -345,13 +447,13 @@ fn main() {
                     b.as_ptr(),
                     sz as i32,
                     0.0,
-                    c.as_mut_ptr(),
+                    c_buf.as_mut_ptr(),
                     sz as i32,
                 );
             }
             let mut t = vec![0u64; it];
             for i in 0..it {
-                c.fill(0.0);
+                c_buf.fill(0.0);
                 let s = Instant::now();
                 unsafe {
                     cblas_sgemm(
@@ -367,45 +469,53 @@ fn main() {
                         b.as_ptr(),
                         sz as i32,
                         0.0,
-                        c.as_mut_ptr(),
+                        c_buf.as_mut_ptr(),
                         sz as i32,
                     );
                 }
                 t[i] = s.elapsed().as_nanos() as u64;
             }
-            r.push((sz, med(&mut t)));
+            results.push((sz, med(&mut t)));
         }
-        r
+        results
     })
     .join()
     .unwrap();
-    for &sz in &[64, 256, 1024] {
+
+    for &sz in &gemm_sizes {
         let a: Vec<f32> = (0..sz * sz).map(|i| (i % 7) as f32 * 0.1).collect();
-        let b: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
-        let mut c = vec![0f32; sz * sz];
-        let it = if sz >= 1024 { 3 } else { 10 };
-        acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+        let bm: Vec<f32> = (0..sz * sz).map(|i| (i % 11) as f32 * 0.1).collect();
+        let mut c_buf = vec![0f32; sz * sz];
+        let it = if sz >= 2048 {
+            2
+        } else if sz >= 512 {
+            5
+        } else {
+            20
+        };
+        acpu::sgemm(&a, &bm, &mut c_buf, sz, sz, sz);
         let mut t = vec![0u64; it];
         for i in 0..it {
-            c.fill(0.0);
+            c_buf.fill(0.0);
             let s = Instant::now();
-            acpu::sgemm(&a, &b, &mut c, sz, sz, sz);
+            acpu::sgemm(&a, &bm, &mut c_buf, sz, sz, sz);
             t[i] = s.elapsed().as_nanos() as u64;
         }
         let an = med(&mut t);
-        let ac = ag.iter().find(|r| r.0 == sz).unwrap().1;
+        let ac = apple_gemm.iter().find(|r| r.0 == sz).unwrap().1;
         let ops = 2.0 * (sz as f64).powi(3);
-        row_gf(&format!("sgemm {}", sz), ops / an as f64, ops / ac as f64);
+        row_gf(
+            &format!("sgemm {sz}×{sz}"),
+            ops / an as f64,
+            ops / ac as f64,
+        );
     }
 
-    // ---- AMX (compare to theoretical peak at 3.2 GHz) ----
-    eprintln!("\n  AMX RAW (ref=theoretical peak)");
-    eprintln!(
-        "  {:<16} {:>8} {:>8}  {:>8} {:>5}",
-        "instruction", "ns/op", "GFLOPS", "peak GF", "util"
-    );
-    eprintln!("  {}", "─".repeat(50));
+    // ── AMX UTILIZATION ──────────────────────────────────────────────────
+
+    eprintln!("\n  AMX UTILIZATION (theoretical peak @ 3.228 GHz)");
     {
+        // warmup AMX context
         let ta = [1f32; 256];
         let tb = [1f32; 256];
         let mut tc = [0f32; 256];
@@ -419,10 +529,18 @@ fn main() {
         let it = 100;
         let ops = 50;
         let mut t = vec![0u64; it];
-        // Theoretical: 1 op/cycle at 3.228 GHz
         let ghz = 3.228;
-        macro_rules! amx {
-            ($nm:expr,$op:expr,$v:expr,$fl:expr) => {
+
+        // ── bandwidth ──
+        eprintln!("  ── bandwidth ──");
+        eprintln!(
+            "  {:<18} {:>7} {:>9} {:>9} {:>5}",
+            "instruction", "ns/op", "GB/s", "peak", "util"
+        );
+        eprintln!("  {}", "─".repeat(52));
+
+        macro_rules! amx_bw {
+            ($nm:expr, $op:expr, $v:expr) => {
                 for i in 0..it {
                     let s = Instant::now();
                     for _ in 0..ops {
@@ -432,88 +550,83 @@ fn main() {
                 }
                 let n = med(&mut t);
                 let npo = n as f64 / ops as f64;
-                if $fl > 0 {
-                    let actual = $fl as f64 / npo;
-                    let peak = $fl as f64 * ghz;
-                    eprintln!(
-                        "  {:<16} {:>8.1} {:>7.0}   {:>7.0} {:>4.0}%",
-                        $nm,
-                        npo,
-                        actual,
-                        peak,
-                        actual / peak * 100.0
-                    );
-                } else {
-                    let peak_bw = 64.0 * ghz; // 64 bytes/op * GHz = GB/s
-                    let actual_bw = 64.0 / npo;
-                    eprintln!(
-                        "  {:<16} {:>8.1} {:>7.1}GB {:>7.1}GB {:>4.0}%",
-                        $nm,
-                        npo,
-                        actual_bw,
-                        peak_bw,
-                        actual_bw / peak_bw * 100.0
-                    );
-                }
+                let peak_bw = 64.0 * ghz;
+                let actual_bw = 64.0 / npo;
+                eprintln!(
+                    "  {:<18} {:>7.1} {:>8.1} {:>8.1} {:>4.0}%",
+                    $nm,
+                    npo,
+                    actual_bw,
+                    peak_bw,
+                    actual_bw / peak_bw * 100.0
+                );
             };
         }
+
         use acpu::matrix::{
             asm::*,
             fma::fma_acc,
             regs::{XRow, YRow},
         };
         let f = fma_acc(XRow::new_unchecked(0), YRow::new_unchecked(0), 0);
-        amx!("LDX", { OP_LDX }, p as u64, 0);
-        amx!("LDX pair", { OP_LDX }, (p as u64) | (1u64 << 62), 0);
-        amx!("LDY", { OP_LDY }, p as u64, 0);
-        amx!("LDZ", { OP_LDZ }, p as u64, 0);
-        amx!("STZ", { OP_STZ }, p as u64, 0);
-        amx!("FMA32 16×16", { OP_FMA32 }, f, 512);
-        amx!("FMA16 32×32", { OP_FMA16 }, f, 2048);
-        amx!("FMA64 8×8", { OP_FMA64 }, f, 128);
-        amx!("MAC16 i16", { OP_MAC16 }, f, 2048);
+
+        amx_bw!("LDX", { OP_LDX }, p as u64);
+        amx_bw!("LDX pair", { OP_LDX }, (p as u64) | (1u64 << 62));
+        amx_bw!("LDY", { OP_LDY }, p as u64);
+        amx_bw!("LDZ", { OP_LDZ }, p as u64);
+        amx_bw!("STZ", { OP_STZ }, p as u64);
+
+        // ── compute ──
+        eprintln!("  ── compute ──");
+        eprintln!(
+            "  {:<18} {:>7} {:>9} {:>9} {:>5}",
+            "instruction", "ns/op", "GFLOPS", "peak", "util"
+        );
+        eprintln!("  {}", "─".repeat(52));
+
+        macro_rules! amx_fp {
+            ($nm:expr, $op:expr, $v:expr, $fl:expr) => {
+                for i in 0..it {
+                    let s = Instant::now();
+                    for _ in 0..ops {
+                        acpu::matrix::asm::amx_op::<$op>($v);
+                    }
+                    t[i] = s.elapsed().as_nanos() as u64;
+                }
+                let n = med(&mut t);
+                let npo = n as f64 / ops as f64;
+                let actual = $fl as f64 / npo;
+                let peak = $fl as f64 * ghz;
+                eprintln!(
+                    "  {:<18} {:>7.1} {:>8.0} {:>8.0} {:>4.0}%",
+                    $nm,
+                    npo,
+                    actual,
+                    peak,
+                    actual / peak * 100.0
+                );
+            };
+        }
+
+        amx_fp!("FMA32 16×16", { OP_FMA32 }, f, 512);
+        amx_fp!("FMA16 32×32", { OP_FMA16 }, f, 2048);
+        amx_fp!("FMA64 8×8", { OP_FMA64 }, f, 128);
+        amx_fp!("MAC16 i16", { OP_MAC16 }, f, 2048);
     }
 
-    // ---- SYNC (compare to atomic CAS as baseline) ----
-    eprintln!("\n  SYNC (ref=atomic CAS)");
-    let cas_ns = ns(|| {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static A: AtomicU64 = AtomicU64::new(0);
-        std::hint::black_box(A.compare_exchange(0, 1, Ordering::SeqCst, Ordering::Relaxed));
-    });
-    eprintln!("  {:<16} {:>8} {:>8}", "primitive", "ns/op", "ref(CAS)");
-    eprintln!("  {}", "─".repeat(34));
-    eprintln!("  {:<16} {:>8} {:>8}", "atomic CAS", cas_ns, "baseline");
-    eprintln!(
-        "  {:<16} {:>8}",
-        "DMB ISH",
-        ns(|| unsafe {
-            acpu::sync::dmb_ish();
-        })
-    );
-    eprintln!(
-        "  {:<16} {:>8}",
-        "DSB ISH",
-        ns(|| unsafe {
-            acpu::sync::dsb_ish();
-        })
-    );
-    eprintln!(
-        "  {:<16} {:>8}",
-        "ISB",
-        ns(|| unsafe {
-            acpu::sync::isb();
-        })
-    );
+    // ── MEMORY HIERARCHY ─────────────────────────────────────────────────
 
-    // ---- MEMORY (compare to memcpy) ----
-    eprintln!("\n  MEMORY BANDWIDTH (ref=memcpy)");
+    eprintln!("\n  MEMORY HIERARCHY (acpu sum bandwidth vs memcpy)");
     eprintln!(
-        "  {:<16} {:>8} {:>8}  {:>8} {:>8}",
-        "level", "sum GB/s", "memcpy", "ratio", ""
+        "  {:<18} {:>8} {:>8} {:>8}",
+        "level", "sum GB/s", "memcpy", "ratio"
     );
-    eprintln!("  {}", "─".repeat(50));
-    for &(sz, label) in &[(4096, "L1 16KB"), (65536, "L2 256KB"), (1048576, "L3 4MB")] {
+    eprintln!("  {}", "─".repeat(46));
+    for &(sz, label) in &[
+        (4096, "L1  16KB"),
+        (65536, "L2  256KB"),
+        (1048576, "L3  4MB"),
+    ] {
         let data: Vec<f32> = vec![1.0; sz];
         let mut dst = vec![0f32; sz];
         let sum_t = ns(|| {
@@ -523,16 +636,28 @@ fn main() {
             dst.copy_from_slice(&data);
             std::hint::black_box(&dst);
         });
-        let sum_bw = sz as f64 * 4.0 / sum_t as f64;
-        let cpy_bw = sz as f64 * 4.0 / cpy_t as f64; // read+write
+        let bytes = sz as f64 * 4.0;
+        let sum_bw = bytes / sum_t as f64;
+        let cpy_bw = bytes / cpy_t as f64;
         eprintln!(
-            "  {:<16} {:>7.1}  {:>7.1}  {:>7.2}x",
+            "  {:<18} {:>7.1} {:>7.1} {:>6.2}×",
             label,
             sum_bw,
             cpy_bw,
             sum_bw / cpy_bw
         );
     }
+
+    // ── SUMMARY ──────────────────────────────────────────────────────────
+
+    let (wins, ties, total) = unsafe { (WINS, TIES, TOTAL) };
+    let losses = total - wins - ties;
+    eprintln!("\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!(
+        "  acpu vs Apple Accelerate: {wins} wins, {ties} ties, {losses} losses ({total} total)"
+    );
+    eprintln!("  ← = acpu faster, ≈ = parity (±5%)");
+    eprintln!("  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     eprintln!("\n=== done ===");
 }
