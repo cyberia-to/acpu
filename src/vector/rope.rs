@@ -17,7 +17,7 @@ use core::arch::aarch64::*;
 ///   out[2*i+1] = x0 * sin(theta) + x1 * cos(theta)
 pub fn rope(out: &mut [f32], x: &[f32], freqs: &[f32], pos: usize) {
     let dim = x.len();
-    assert!(dim.is_multiple_of(2), "rope: dimension must be even");
+    assert!(dim % 2 == 0, "rope: dimension must be even");
     let n_pairs = dim / 2;
     assert!(freqs.len() >= n_pairs, "rope: not enough frequencies");
     assert!(out.len() >= dim, "rope: output buffer too small");

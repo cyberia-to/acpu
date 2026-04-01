@@ -48,6 +48,34 @@ atomics, core affinity, memory barriers), and PMU performance
 counters. zero external dependencies — only inline assembly,
 sysctl, and dlopen for libkperf.
 
+## role in the stack
+
+acpu is a hardware compute driver. it runs math on CPU/AMX/NEON.
+it does NOT allocate memory, compile shaders, build graphs, or schedule ops.
+
+```
+cyb-mem      memory: IOSurface, arena, pool
+acpu         driver: CPU/AMX compute (NEON, AMX inline asm)  ← this crate
+aruminium    driver: Metal GPU compute (shaders, pipelines)
+rane         driver: ANE hardware (MIL compile, dispatch)
+  ↑ drivers — raw hardware access, no model knowledge
+──────────────────────────────────────────────────────
+  ↓ runtimes — model graphs, scheduling, inference logic
+cyb/llm      runtime: graph IR, jets, scheduling, model loading
+```
+
+all inference logic (attention blocks, transformer layers, model loading,
+op scheduling, graph optimization) belongs in the runtime layer
+(https://github.com/cyberia-to/cyb), not in the drivers.
+
+drivers expose raw capabilities. runtimes compose them.
+
+## sibling drivers
+
+- cyb-mem (https://github.com/cyberia-to/unimem) — memory: IOSurface, arena, zero-copy buffers
+- aruminium (https://github.com/cyberia-to/aruminium) — Metal GPU: shaders, buffers, compute
+- rane (https://github.com/cyberia-to/rane) — ANE: MIL compile, load, run
+
 ## architecture
 
 single crate, six organs:
