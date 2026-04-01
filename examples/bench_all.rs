@@ -910,7 +910,7 @@ fn main() {
                 if t < best { best = t; }
             }
             let gf = ops / best as f64;
-            eprintln!("  {:<18} {:>7.1}GF  scalar (AMX FMA16 planned)", "hgemm fp16", gf);
+            eprintln!("  {:<18} {:>7.1}GF  cvt+sgemm (FMA16 GEBP planned)", "hgemm fp16", gf);
         }
 
         // bgemm (bf16 in, fp32 accum)
@@ -928,7 +928,7 @@ fn main() {
                 if t < best { best = t; }
             }
             let gf = ops / best as f64;
-            eprintln!("  {:<18} {:>7.1}GF  scalar (AMX FMABF16 planned)", "bgemm bf16", gf);
+            eprintln!("  {:<18} {:>7.1}GF  cvt+sgemm", "bgemm bf16", gf);
         }
 
         // qgemm (i8 in, fp32 accum)
@@ -946,7 +946,7 @@ fn main() {
                 if t < best { best = t; }
             }
             let gf = ops / best as f64;
-            eprintln!("  {:<18} {:>7.1}GF  scalar (AMX MAC16 planned)", "qgemm i8", gf);
+            eprintln!("  {:<18} {:>7.1}GF  dequant+sgemm (MAC16 planned)", "qgemm i8", gf);
         }
     }
 
