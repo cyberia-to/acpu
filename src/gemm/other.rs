@@ -127,25 +127,26 @@ fn matmul_f16_amx(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: us
 }
 
 /// BFloat16 matrix multiply: C += A × B (bf16 in, fp32 accum).
+///
+/// Converts bf16→f32 then dispatches to AMX sgemm. No native bf16 AMX on M1-M4.
 pub fn matmul_bf16(a: &[u16], b: &[u16], c: &mut [f32], m: usize, n: usize, k: usize) {
     assert_eq!(a.len(), m * k);
     assert_eq!(b.len(), k * n);
     assert_eq!(c.len(), m * n);
 
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0f32;
-            for p in 0..k {
-                let av = crate::numeric::bf16::bf16_to_f32(a[i * k + p]);
-                let bv = crate::numeric::bf16::bf16_to_f32(b[p * n + j]);
-                acc += av * bv;
-            }
-            c[i * n + j] += acc;
-        }
-    }
+    // Convert bf16 → f32
+    let mut a_f32 = vec![0f32; m * k];
+    let mut b_f32 = vec![0f32; k * n];
+    crate::cast_bf16_f32(&mut a_f32, a);
+    crate::cast_bf16_f32(&mut b_f32, b);
+
+    // Dispatch to AMX sgemm
+    super::matmul_f32(&a_f32, &b_f32, c, m, n, k);
 }
 
 /// Int8 quantised matrix multiply: C += scale × (A - zero) × (B - zero).
+///
+/// Dequantizes i8→f32, then dispatches to AMX sgemm. MAC16 i16 path planned.
 #[allow(clippy::too_many_arguments)]
 pub fn matmul_i8(
     a: &[i8],
@@ -161,16 +162,16 @@ pub fn matmul_i8(
     assert_eq!(b.len(), k * n);
     assert_eq!(c.len(), m * n);
 
-    let z = zero as i32;
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0i32;
-            for p in 0..k {
-                acc += (a[i * k + p] as i32 - z) * (b[p * n + j] as i32 - z);
-            }
-            c[i * n + j] += acc as f32 * scale;
-        }
+    let z = zero as f32;
+    let mut a_f32 = vec![0f32; m * k];
+    let mut b_f32 = vec![0f32; k * n];
+    for i in 0..a.len() {
+        a_f32[i] = (a[i] as f32 - z) * scale.sqrt();
     }
+    for i in 0..b.len() {
+        b_f32[i] = (b[i] as f32 - z) * scale.sqrt();
+    }
+    super::matmul_f32(&a_f32, &b_f32, c, m, n, k);
 }
 
 #[cfg(test)]
